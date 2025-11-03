@@ -1,0 +1,1 @@
+{"task_id": "c1c3487b", "symbol": "AAPL.US", "mode": "paper", "interval": {"value": 5, "unit": "seconds"}, "sessions": ["盘中", "盘前"], "duration": {"mode": "permanent", "days": 0, "hours": 0, "minutes": 0, "seconds": 0}, "start_time": "2025-11-03T20:03:22.887172", "status": "running", "file_path": "stock_data/fetch/c1c3487b.txt"}

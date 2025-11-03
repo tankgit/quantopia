@@ -1,0 +1,24 @@
+[project]
+name = "quantopia-backend"
+version = "0.1.0"
+description = "Quantopia Backend - Quantitative Trading Experiment System"
+authors = [
+    {name = "Tank"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "numpy>=1.24.0",
+    "httpx>=0.25.0",
+    "longport>=1.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantopia"]
+

@@ -1,0 +1,1 @@
+{"task_id": "8c47712a", "symbol": "AAPL.US", "mode": "paper", "interval": {"value": 5, "unit": "seconds"}, "sessions": ["盘中", "盘前"], "duration": {"mode": "permanent", "days": 0, "hours": 0, "minutes": 0, "seconds": 0}, "start_time": "2025-11-03T20:00:52.762175", "status": "running", "file_path": "stock_data/fetch/8c47712a.txt"}
