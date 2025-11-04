@@ -116,6 +116,9 @@ class StockDataGenerator:
             "seed": seed
         }
         
+        # 确保输出目录存在
+        os.makedirs(self.output_dir, exist_ok=True)
+        
         # 保存数据
         file_path = os.path.join(self.output_dir, f"{file_id}.txt")
         with open(file_path, 'w', encoding='utf-8') as f:

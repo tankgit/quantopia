@@ -1,0 +1,13 @@
+# Node.js/Frontend artifacts
+node_modules/
+dist/
+build/
+.vite/
+
+# Python virtual environments
+.venv/
+
+# Log and generated stock data directories
+logs/
+stock_data/
+

@@ -1014,12 +1014,18 @@ def _fetch_file_path(task_id: str) -> str:
 
 
 def _write_fetch_header(task_id: str, info: FetchTaskInfo) -> None:
+    # 确保爬取数据目录存在
+    os.makedirs(FETCH_DIR, exist_ok=True)
+    
     path = _fetch_file_path(task_id)
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(info.model_dump(), ensure_ascii=False) + "\n")
 
 
 def _append_fetch_point(task_id: str, point: Dict) -> None:
+    # 确保爬取数据目录存在
+    os.makedirs(FETCH_DIR, exist_ok=True)
+    
     path = _fetch_file_path(task_id)
     # 格式：时间,交易时段,价格（逗号分隔）
     # 时间只精确到秒，去掉毫秒

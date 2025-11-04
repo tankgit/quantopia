@@ -125,6 +125,9 @@ class BacktestLogger:
         if self.current_run_id is None:
             raise ValueError("No active logging session. Call start_logging first.")
         
+        # 确保日志目录存在
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
         file_path = os.path.join(self.logs_dir, f"{self.current_run_id}.json")
         
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -173,6 +176,9 @@ class BacktestLogger:
             run_id: 回测运行ID
             log_entries: 更新后的日志条目列表
         """
+        # 确保日志目录存在
+        os.makedirs(self.logs_dir, exist_ok=True)
+        
         file_path = os.path.join(self.logs_dir, f"{run_id}.json")
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(log_entries, f, indent=2, ensure_ascii=False)
