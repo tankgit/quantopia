@@ -8,6 +8,18 @@ Quantopia是我个人launch的一个量化工具平台，希望可以集成数�
 
 实盘数据以及交易接口目前均使用长桥证券API，暂未支持其他平台。
 
+## 界面预览
+
+- 资产管理
+![](./.assets/shot-assets.png)
+
+- 数据管理
+![](./.assets/shot-data.png)
+
+- 量化详情
+![](./.assets/shot-test.png)
+
+
 ## 项目结构
 
 ```
