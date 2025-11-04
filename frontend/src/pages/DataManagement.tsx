@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPlus, faChartLine, faChartBar, faChartArea, faSatelliteDish, faPause, faPlay, faStop, faEye, faTrash } from '@fortawesome/free-solid-svg-icons';
+import { faPlus, faChartLine, faChartBar, faChartArea, faSatelliteDish, faPause, faPlay, faStop, faTrash } from '@fortawesome/free-solid-svg-icons';
 import { dataApi, fetchApi } from '../services/api';
 import DataChart from '../components/DataChart';
 import type { DataFile, DataGenerateRequest, FetchTaskCreateRequest, FetchTaskSummary } from '../types';
@@ -16,6 +16,8 @@ export default function DataManagement() {
   const [chartType, setChartType] = useState<'line' | 'area' | 'bar'>('line');
   const [selectedFilters, setSelectedFilters] = useState<Set<string>>(new Set());
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showDeleteFetchConfirm, setShowDeleteFetchConfirm] = useState(false);
+  const [fetchTaskToDelete, setFetchTaskToDelete] = useState<string | null>(null);
   const [formData, setFormData] = useState<DataGenerateRequest>({
     length: 100,
     base_mean: 100.0,
@@ -160,6 +162,16 @@ export default function DataManagement() {
     mutationFn: fetchApi.stop,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['fetchTasks'] });
+    },
+  });
+
+  const deleteFetchMutation = useMutation({
+    mutationFn: (taskId: string) => fetchApi.delete(taskId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fetchTasks'] });
+      queryClient.invalidateQueries({ queryKey: ['dataList'] });
+      setShowDeleteFetchConfirm(false);
+      setFetchTaskToDelete(null);
     },
   });
 
@@ -472,12 +484,16 @@ export default function DataManagement() {
         </div>
         <div className="space-y-2 max-h-[300px] overflow-y-auto">
           {fetchTasks?.tasks?.map((t: FetchTaskSummary) => (
-            <div key={t.task_id} className="flex items-center justify-between p-4 bg-slate-800/60 rounded-xl border border-slate-600/50">
+            <div
+              key={t.task_id}
+              onClick={() => navigate(`/data/fetch/${t.task_id}`)}
+              className="flex items-center justify-between p-4 bg-slate-800/60 rounded-xl border border-slate-600/50 cursor-pointer hover:bg-slate-800/80 hover:border-slate-500/50 transition-all"
+            >
               <div>
                 <div className="text-white font-mono text-sm">{t.task_id} · {t.symbol} · {t.mode}</div>
                 <div className="text-xs text-slate-400 mt-1">{new Date(t.started_at).toLocaleString('zh-CN')} · 每 {t.interval.value} {t.interval.unit}</div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                 <span className={`px-2 py-1 text-xs rounded-full border ${t.status.startsWith('error') ? 'text-red-300 border-red-400/30' : t.status === 'running' ? 'text-emerald-300 border-emerald-400/30' : t.status === 'paused' ? 'text-yellow-300 border-yellow-400/30' : 'text-slate-300 border-slate-400/30'}`}>{t.status}</span>
                 {t.status === 'running' && (
                   <button
@@ -507,11 +523,14 @@ export default function DataManagement() {
                   </button>
                 )}
                 <button
-                  onClick={() => navigate(`/data/fetch/${t.task_id}`)}
-                  className="px-2 py-1 rounded-lg text-xs bg-blue-600/60 text-white hover:bg-blue-600/80 border border-blue-400/40"
-                  title="查看详情"
+                  onClick={() => {
+                    setFetchTaskToDelete(t.task_id);
+                    setShowDeleteFetchConfirm(true);
+                  }}
+                  className="px-2 py-1 rounded-lg text-xs bg-red-600/60 text-white hover:bg-red-600/80 border border-red-400/40"
+                  title="删除任务"
                 >
-                  <FontAwesomeIcon icon={faEye} className="w-3 h-3" />
+                  <FontAwesomeIcon icon={faTrash} className="w-3 h-3" />
                 </button>
               </div>
             </div>
@@ -759,7 +778,7 @@ export default function DataManagement() {
         </div>
       </div>
 
-      {/* 删除确认对话框 */}
+      {/* 删除数据确认对话框 */}
       {showDeleteConfirm && selectedData && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 rounded-2xl p-8 border border-slate-700 shadow-2xl max-w-md w-full mx-4">
@@ -784,6 +803,40 @@ export default function DataManagement() {
                 className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {deleteMutation.isPending ? '删除中...' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 删除爬取任务确认对话框 */}
+      {showDeleteFetchConfirm && fetchTaskToDelete && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 rounded-2xl p-8 border border-slate-700 shadow-2xl max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-white mb-4">确认删除爬取任务</h3>
+            <p className="text-slate-300 mb-6">
+              确定要删除爬取任务 <span className="font-mono text-white">{fetchTaskToDelete}</span> 吗？此操作将删除任务及其所有数据，且不可恢复。
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowDeleteFetchConfirm(false);
+                  setFetchTaskToDelete(null);
+                }}
+                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (fetchTaskToDelete) {
+                    deleteFetchMutation.mutate(fetchTaskToDelete);
+                  }
+                }}
+                disabled={deleteFetchMutation.isPending}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {deleteFetchMutation.isPending ? '删除中...' : '确认删除'}
               </button>
             </div>
           </div>

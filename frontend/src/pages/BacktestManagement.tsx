@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPlus, faPlay, faSort, faSortUp, faSortDown } from '@fortawesome/free-solid-svg-icons';
+import { faPlus, faPlay, faSort, faSortUp, faSortDown, faTrash } from '@fortawesome/free-solid-svg-icons';
 import { backtestApi, dataApi } from '../services/api';
 import { useStrategies } from '../services/strategies';
 import { getValueColor } from '../utils/format';
@@ -17,6 +17,8 @@ export default function BacktestManagement() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [sortField, setSortField] = useState<SortField>('start_time');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [backtestToDelete, setBacktestToDelete] = useState<string | null>(null);
   const [formData, setFormData] = useState<BacktestCreateRequest>({
     data_file_id: '',
     strategy_name: 'MA_Strategy',
@@ -45,6 +47,15 @@ export default function BacktestManagement() {
       queryClient.invalidateQueries({ queryKey: ['backtestList'] });
       setShowCreateForm(false);
       navigate(`/backtests/${data.run_id}`);
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (runId: string) => backtestApi.delete(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtestList'] });
+      setShowDeleteConfirm(false);
+      setBacktestToDelete(null);
     },
   });
 
@@ -314,15 +325,15 @@ export default function BacktestManagement() {
                 </button>
               </div>
               <div className="col-span-2">数据文件</div>
-              <div className="col-span-2">策略</div>
+              <div className="col-span-1">策略</div>
+              <div className="col-span-1 text-right">操作</div>
             </div>
             
             {/* 回测列表项 */}
             <div className="space-y-3">
               {sortedBacktests.map((backtest, index) => (
-                <button
+                <div
                   key={backtest.run_id}
-                  onClick={() => navigate(`/backtests/${backtest.run_id}`)}
                   className="w-full text-left p-6 bg-slate-700/50 hover:bg-slate-700/70 rounded-2xl border border-slate-600/50 hover:border-purple-500/50 transition-all duration-300 group shadow-sm hover:shadow-md hover:shadow-purple-500/10 hover:scale-[1.01]"
                   style={{ 
                     animationDelay: `${index * 50}ms`,
@@ -330,44 +341,97 @@ export default function BacktestManagement() {
                   }}
                 >
                   <div className="grid grid-cols-12 gap-4 items-center">
-                    <div className="col-span-2">
-                      <div className="font-mono text-white text-sm font-semibold group-hover:text-purple-300 transition-colors">
-                        {backtest.run_id}
-                      </div>
-                      <div className="text-xs text-slate-500 mt-1">
-                        {new Date(backtest.start_time).toLocaleDateString('zh-CN')}
+                    <div 
+                      className="col-span-11 cursor-pointer"
+                      onClick={() => navigate(`/backtests/${backtest.run_id}`)}
+                    >
+                      <div className="grid grid-cols-12 gap-4 items-center">
+                        <div className="col-span-2">
+                          <div className="font-mono text-white text-sm font-semibold group-hover:text-purple-300 transition-colors">
+                            {backtest.run_id}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-1">
+                            {new Date(backtest.start_time).toLocaleDateString('zh-CN')}
+                          </div>
+                        </div>
+                        <div className={`col-span-2 text-lg font-bold ${getValueColor(backtest.stats.total_return_pct)}`}>
+                          {backtest.stats.total_return_pct.toFixed(2)}%
+                        </div>
+                        <div className="col-span-2">
+                          <div className="text-lg font-bold text-cyan-300">
+                            {backtest.stats.win_rate?.toFixed(2) ?? '0.00'}%
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="text-lg font-bold text-slate-200">
+                            {backtest.stats.total_trades}
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="text-sm text-slate-300 font-mono">
+                            {backtest.data_file_id}
+                          </div>
+                        </div>
+                        <div className="col-span-1">
+                          <div className="text-sm text-slate-300">
+                            {backtest.strategy_name}
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    <div className={`col-span-2 text-lg font-bold ${getValueColor(backtest.stats.total_return_pct)}`}>
-                      {backtest.stats.total_return_pct.toFixed(2)}%
-                    </div>
-                    <div className="col-span-2">
-                      <div className="text-lg font-bold text-cyan-300">
-                        {backtest.stats.win_rate?.toFixed(2) ?? '0.00'}%
-                      </div>
-                    </div>
-                    <div className="col-span-2">
-                      <div className="text-lg font-bold text-slate-200">
-                        {backtest.stats.total_trades}
-                      </div>
-                    </div>
-                    <div className="col-span-2">
-                      <div className="text-sm text-slate-300 font-mono">
-                        {backtest.data_file_id}
-                      </div>
-                    </div>
-                    <div className="col-span-2">
-                      <div className="text-sm text-slate-300">
-                        {backtest.strategy_name}
-                      </div>
+                    <div className="col-span-1 flex justify-end" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => {
+                          setBacktestToDelete(backtest.run_id);
+                          setShowDeleteConfirm(true);
+                        }}
+                        className="px-2 py-2 rounded-lg bg-red-600/60 border border-red-400/40 text-white hover:bg-red-600/80 flex items-center justify-center"
+                        title="删除回测"
+                      >
+                        <FontAwesomeIcon icon={faTrash} className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </>
         )}
       </div>
+
+      {/* 删除确认对话框 */}
+      {showDeleteConfirm && backtestToDelete && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 rounded-2xl p-8 border border-slate-700 shadow-2xl max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-white mb-4">确认删除回测记录</h3>
+            <p className="text-slate-300 mb-6">
+              确定要删除回测记录 <span className="font-mono text-white">{backtestToDelete}</span> 吗？此操作将删除回测及其所有数据，且不可恢复。
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setShowDeleteConfirm(false);
+                  setBacktestToDelete(null);
+                }}
+                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (backtestToDelete) {
+                    deleteMutation.mutate(backtestToDelete);
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {deleteMutation.isPending ? '删除中...' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

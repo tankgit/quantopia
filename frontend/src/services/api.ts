@@ -11,6 +11,13 @@ import type {
   FetchTaskCreateRequest,
   FetchTaskSummary,
   FetchTaskDetailResponse,
+  TradeTaskCreateRequest,
+  TradeTaskSummary,
+  TradeTaskDetailResponse,
+  AccountInfo,
+  AccountAssets,
+  Position,
+  Order,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:15000';
@@ -83,6 +90,10 @@ export const backtestApi = {
     const response = await api.post(`/api/backtest/${runId}/analyze/stop`);
     return response.data;
   },
+  delete: async (runId: string): Promise<{ message: string }> => {
+    const response = await api.delete(`/api/backtest/${runId}`);
+    return response.data;
+  },
 };
 
 // 策略相关API
@@ -117,6 +128,65 @@ export const fetchApi = {
   },
   stop: async (taskId: string): Promise<{ message: string }> => {
     const response = await api.post(`/api/fetch/${taskId}/stop`);
+    return response.data;
+  },
+  delete: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.delete(`/api/fetch/${taskId}`);
+    return response.data;
+  },
+};
+
+// 实时交易任务 API
+export const tradeApi = {
+  create: async (request: TradeTaskCreateRequest): Promise<{ task_id: string }> => {
+    const response = await api.post('/api/trade/create', request);
+    return response.data;
+  },
+  list: async (): Promise<{ tasks: TradeTaskSummary[]; count: number }> => {
+    const response = await api.get('/api/trade/list');
+    return response.data;
+  },
+  get: async (taskId: string): Promise<TradeTaskDetailResponse> => {
+    const response = await api.get(`/api/trade/${taskId}`);
+    return response.data;
+  },
+  pause: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.post(`/api/trade/${taskId}/pause`);
+    return response.data;
+  },
+  resume: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.post(`/api/trade/${taskId}/resume`);
+    return response.data;
+  },
+  stop: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.post(`/api/trade/${taskId}/stop`);
+    return response.data;
+  },
+  delete: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.delete(`/api/trade/${taskId}`);
+    return response.data;
+  },
+};
+
+// 账户管理 API
+export const accountApi = {
+  list: async (mode: string = 'paper'): Promise<{ accounts: AccountInfo[]; count: number }> => {
+    const response = await api.get('/api/account/list', { params: { mode } });
+    return response.data;
+  },
+
+  getAssets: async (market: 'US' | 'HK', mode: string = 'paper'): Promise<AccountAssets> => {
+    const response = await api.get(`/api/account/${market}/assets`, { params: { mode } });
+    return response.data;
+  },
+
+  getPositions: async (market: 'US' | 'HK', mode: string = 'paper'): Promise<{ positions: Position[]; count: number }> => {
+    const response = await api.get(`/api/account/${market}/positions`, { params: { mode } });
+    return response.data;
+  },
+
+  getTodayOrders: async (market: 'US' | 'HK', mode: string = 'paper'): Promise<{ orders: Order[]; count: number; market: string }> => {
+    const response = await api.get(`/api/account/${market}/orders/today`, { params: { mode } });
     return response.data;
   },
 };

@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 import httpx
 import json
 import asyncio
@@ -33,6 +35,225 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def load_tasks_from_logs():
+    """启动时加载所有任务日志到内存"""
+    import os
+    from pathlib import Path
+    
+    # 加载交易任务（使用logs/trade目录）
+    trade_log_dir = Path("logs/trade")
+    if trade_log_dir.exists():
+        for log_file in trade_log_dir.glob("*.txt"):
+            try:
+                task_id = log_file.stem
+                # 读取整个文件内容
+                with open(log_file, "r", encoding="utf-8") as f:
+                    all_content = f.read()
+                
+                lines = all_content.split('\n')
+                if not lines or not lines[0].strip():
+                    continue
+                
+                # 解析第一行配置JSON
+                config = json.loads(lines[0].strip())
+                
+                # 如果status是running，改为paused
+                status = config.get("status", "stopped")
+                if status == "running":
+                    status = "paused"
+                    # 更新配置中的status
+                    config["status"] = "paused"
+                    # 更新日志文件中的status
+                    lines[0] = json.dumps(config, ensure_ascii=False)
+                    with open(log_file, "w", encoding="utf-8") as f:
+                        f.write('\n'.join(lines))
+                
+                # 重建meta对象
+                duration = config.get("duration", {})
+                # 转换duration为timedelta
+                duration_obj = TradeDuration(**duration)
+                if duration_obj.mode == "permanent":
+                    duration_delta = None
+                else:
+                    duration_delta = timedelta(
+                        days=duration_obj.days,
+                        hours=duration_obj.hours,
+                        minutes=duration_obj.minutes,
+                        seconds=duration_obj.seconds
+                    )
+                
+                started_at_str = config.get("start_time", "")
+                try:
+                    started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                except Exception:
+                    started_at = datetime.now(ZoneInfo("UTC"))
+                
+                # 初始化缓存（从日志文件重建价格缓存）
+                price_cache = []
+                price_timestamps = []
+                trade_records = []
+                
+                # 解析日志行，重建缓存和交易记录
+                if len(lines) > 1:
+                    for line in lines[1:]:  # 跳过第一行配置
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        parts = line.split(",", 2)
+                        if len(parts) >= 3:
+                            timestamp_str, log_type, data_str = parts[0], parts[1], parts[2]
+                            try:
+                                data = json.loads(data_str)
+                                
+                                # 重建价格缓存
+                                if log_type == "price_sample" and "price" in data:
+                                    price_cache.append(data["price"])
+                                    try:
+                                        # 尝试解析时间戳
+                                        dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                                        price_timestamps.append(dt.isoformat())
+                                    except Exception:
+                                        price_timestamps.append(timestamp_str)
+                                
+                                # 重建交易记录（只包含buy/sell）
+                                if log_type == "trade" and data.get("trade_type") in ["buy", "sell"]:
+                                    trade_records.append({
+                                        "timestamp": timestamp_str,
+                                        "type": "trade",
+                                        "trade_type": data.get("trade_type"),
+                                        "price": data.get("price"),
+                                        "signal_info": data.get("signal_info", {}),
+                                        "session": data.get("session", ""),
+                                    })
+                            except Exception:
+                                continue
+                
+                # 限制缓存大小
+                max_cache_size = config.get("max_cache_size", 1000)
+                if len(price_cache) > max_cache_size:
+                    price_cache = price_cache[-max_cache_size:]
+                    price_timestamps = price_timestamps[-max_cache_size:]
+                
+                # 读取metrics（如果存在）
+                metrics = config.get("metrics", {})
+                initial_cash = metrics.get("initial_cash", 100000.0) if metrics else 100000.0
+                
+                # 加载到_trade_tasks
+                _trade_tasks[task_id] = {
+                    "symbol": config.get("symbol", ""),
+                    "mode": config.get("mode", "paper"),
+                    "strategy_name": config.get("strategy_name", ""),
+                    "strategy_params": config.get("strategy_params", {}),
+                    "sessions": config.get("sessions", []),
+                    "duration": duration,
+                    "duration_delta": duration_delta,
+                    "price_interval": config.get("price_interval", {"value": 5, "unit": "seconds"}),
+                    "signal_interval": config.get("signal_interval", {"value": 30, "unit": "seconds"}),
+                    "max_cache_size": max_cache_size,
+                    "started_at": started_at,
+                    "status": status,
+                    "file_path": config.get("file_path", os.path.join("logs", "trade", f"{task_id}.txt")),
+                    "price_cache": price_cache,
+                    "price_timestamps": price_timestamps,
+                    "trade_records": trade_records,
+                    "current_session": config.get("current_session"),
+                    "timezone": config.get("timezone", "America/New_York"),
+                    "initial_cash": initial_cash,
+                }
+                
+                # 如果状态是paused，设置暂停标志
+                if status == "paused":
+                    _trade_task_paused[task_id] = True
+                else:
+                    _trade_task_paused[task_id] = False
+                        
+            except Exception as e:
+                # 如果某个任务日志加载失败，记录错误但继续加载其他任务
+                print(f"Warning: Failed to load trade task {log_file.stem}: {_format_error(e)}")
+                continue
+    
+    # 回测任务不需要加载到内存，因为它们是从日志文件动态读取的
+    # list_backtests() 函数会直接从日志文件读取
+    print(f"Loaded {len(_trade_tasks)} trade tasks from logs")
+    
+    # 加载爬取数据任务（使用stock_data/fetch目录）
+    fetch_log_dir = Path(FETCH_DIR)
+    if fetch_log_dir.exists():
+        for fetch_file in fetch_log_dir.glob("*.txt"):
+            try:
+                task_id = fetch_file.stem
+                # 读取第一行配置
+                with open(fetch_file, "r", encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                
+                if not first_line:
+                    continue
+                
+                # 解析第一行配置JSON
+                config = json.loads(first_line)
+                
+                # 如果status是stopped，跳过该任务
+                status = config.get("status", "stopped")
+                if status == "stopped":
+                    continue
+                
+                # 如果status不是stopped，设置为paused并更新文件
+                if status != "paused":
+                    status = "paused"
+                    config["status"] = "paused"
+                    # 更新文件中的status
+                    with open(fetch_file, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    if lines:
+                        lines[0] = json.dumps(config, ensure_ascii=False) + "\n"
+                        with open(fetch_file, "w", encoding="utf-8") as f:
+                            f.writelines(lines)
+                
+                # 解析配置并重建meta对象
+                interval = config.get("interval", {"value": 5, "unit": "seconds"})
+                interval_obj = FetchInterval(**interval) if isinstance(interval, dict) else interval
+                
+                duration = config.get("duration", {"mode": "permanent"})
+                duration_obj = FetchDuration(**duration) if isinstance(duration, dict) else duration
+                duration_delta = _duration_to_timedelta(duration_obj)
+                
+                started_at_str = config.get("start_time", "")
+                try:
+                    started_at = datetime.fromisoformat(started_at_str.replace("Z", "+00:00"))
+                except Exception:
+                    started_at = datetime.now(ZoneInfo("UTC"))
+                
+                # 加载到_fetch_tasks
+                _fetch_tasks[task_id] = {
+                    "symbol": config.get("symbol", ""),
+                    "mode": config.get("mode", "paper"),
+                    "interval": interval_obj,
+                    "sessions": config.get("sessions", []),
+                    "duration": duration,
+                    "duration_delta": duration_delta,
+                    "started_at": started_at,
+                    "status": status,
+                    "file_path": config.get("file_path", _fetch_file_path(task_id)),
+                    "current_session": config.get("current_session"),
+                    "timezone": config.get("timezone", "America/New_York"),
+                }
+                
+                # 如果状态是paused，设置暂停标志
+                if status == "paused":
+                    _fetch_task_paused[task_id] = True
+                else:
+                    _fetch_task_paused[task_id] = False
+                        
+            except Exception as e:
+                # 如果某个任务日志加载失败，记录错误但继续加载其他任务
+                print(f"Warning: Failed to load fetch task {fetch_file.stem}: {_format_error(e)}")
+                continue
+    
+    print(f"Loaded {len(_fetch_tasks)} fetch tasks from logs")
 
 
 # Pydantic模型定义
@@ -89,8 +310,9 @@ class LongPortOrderRequest(BaseModel):
 
 # 初始化全局组件
 data_generator = StockDataGenerator()
-backtest_engine = Backtest(logger=BacktestLogger(), data_generator=data_generator)
-logger = BacktestLogger()
+BACKTEST_LOG_DIR = "logs/test"  # 回测日志目录
+backtest_engine = Backtest(logger=BacktestLogger(logs_dir=BACKTEST_LOG_DIR), data_generator=data_generator)
+logger = BacktestLogger(logs_dir=BACKTEST_LOG_DIR)
 longport_service = LongPortService()
 
 # 存储AI分析任务进度 {run_id: {"status": "running"/"completed"/"error"/"cancelled", "progress": 0-100, "message": "", "total": 0, "current": 0}}
@@ -187,7 +409,7 @@ async def list_data_files():
             file_info["type"] = "generated"
             files.append(file_info)
         
-        # 爬取的实盘数据
+        # 爬取的实盘数据（只返回status为stopped的数据）
         if os.path.exists(FETCH_DIR):
             for filename in os.listdir(FETCH_DIR):
                 if filename.endswith('.txt'):
@@ -198,6 +420,10 @@ async def list_data_files():
                             first_line = f.readline().strip()
                             if first_line:
                                 config = json.loads(first_line)
+                                # 只返回status为stopped的数据
+                                status = config.get("status", "stopped")
+                                if status != "stopped":
+                                    continue
                                 # 统计数据点数量
                                 lines = f.readlines()
                                 data_count = len([l for l in lines if l.strip()])
@@ -464,6 +690,36 @@ async def get_backtest_detail(run_id: str):
         raise HTTPException(status_code=404, detail=f"Backtest not found: {run_id}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/backtest/{run_id}")
+async def delete_backtest(run_id: str):
+    """
+    删除回测记录
+    
+    Args:
+        run_id: 回测运行ID
+        
+    Returns:
+        删除成功消息
+    """
+    try:
+        # 检查回测是否存在
+        try:
+            logger.load(run_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="回测记录不存在")
+        
+        # 删除日志文件
+        log_file_path = os.path.join(BACKTEST_LOG_DIR, f"{run_id}.json")
+        if os.path.exists(log_file_path):
+            os.remove(log_file_path)
+        
+        return {"message": "回测记录已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
 
 
 async def call_ai_model(api_url: str, api_key: str, model_name: str, messages: list[dict]) -> str:
@@ -942,9 +1198,163 @@ async def lp_cancel_order(order_id: str, mode: str = "paper"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ================== 账户管理API ==================
+@app.get("/api/account/list")
+async def get_account_list(mode: str = "paper"):
+    """获取所有账户列表（US和HK）"""
+    try:
+        accounts = longport_service.get_account_list(mode=mode)
+        return {"accounts": accounts, "count": len(accounts)}
+    except RuntimeError as e:
+        # RuntimeError 通常是凭证相关的友好错误信息
+        error_msg = str(e)
+        print(f"[ERROR] 凭证错误: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "credential" in error_str or "auth" in error_str or "unauthorized" in error_str:
+            raise HTTPException(status_code=400, detail=f"{mode}账户凭证验证失败，请检查账户凭证是否正确")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/account/{market}/assets")
+async def get_account_assets(market: str, mode: str = "paper"):
+    """
+    获取特定市场的资产信息
+    market: "US" 或 "HK"
+    """
+    try:
+        market = market.upper()
+        if market not in ["US", "HK"]:
+            raise HTTPException(status_code=400, detail="market必须是US或HK")
+        assets = longport_service.get_assets_by_market(market, mode=mode)
+        # 使用print输出以便调试（比logging更可靠）
+        print(f"[DEBUG] 获取{market}市场资产信息: {assets}")
+        print(f"[DEBUG] 资产类型: {type(assets)}, 是否为空: {not assets}")
+        return assets
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # RuntimeError 通常是凭证相关的友好错误信息
+        error_msg = str(e)
+        print(f"[ERROR] 凭证错误: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        import traceback
+        error_detail = f"获取资产信息失败: {str(e)}"
+        print(f"[ERROR] {error_detail}")
+        print(f"[ERROR] {traceback.format_exc()}")
+        # 检查是否是常见的错误类型
+        error_str = str(e).lower()
+        if "credential" in error_str or "auth" in error_str or "unauthorized" in error_str:
+            raise HTTPException(status_code=400, detail=f"{mode}账户凭证验证失败，请检查账户凭证是否正确")
+        else:
+            raise HTTPException(status_code=500, detail=error_detail)
+
+
+@app.get("/api/account/{market}/positions")
+async def get_account_positions(market: str, mode: str = "paper"):
+    """获取特定市场的持仓列表"""
+    try:
+        market = market.upper()
+        if market not in ["US", "HK"]:
+            raise HTTPException(status_code=400, detail="market必须是US或HK")
+        positions = longport_service.get_positions_by_market(market, mode=mode)
+        return {"positions": positions, "count": len(positions)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _is_today_in_market_timezone(dt: datetime, market: str) -> bool:
+    """
+    判断datetime是否在指定市场的当日（按当地时区）
+    """
+    if not dt:
+        return False
+    
+    # 转换为市场时区
+    if market == "US":
+        # 美股时区：America/New_York (EST/EDT)
+        market_tz = ZoneInfo("America/New_York")
+    elif market == "HK":
+        # 港股时区：Asia/Hong_Kong (HKT)
+        market_tz = ZoneInfo("Asia/Hong_Kong")
+    else:
+        return False
+    
+    # 如果dt是naive，假设是UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    
+    # 转换为市场时区
+    dt_market = dt.astimezone(market_tz)
+    
+    # 获取市场时区的今天
+    today_market = datetime.now(market_tz).date()
+    
+    # 判断是否是同一天
+    return dt_market.date() == today_market
+
+
+@app.get("/api/account/{market}/orders/today")
+async def get_account_today_orders(market: str, mode: str = "paper"):
+    """
+    获取特定市场的当日交易记录（按当地股票交易时间）
+    market: "US" 或 "HK"
+    """
+    try:
+        market = market.upper()
+        if market not in ["US", "HK"]:
+            raise HTTPException(status_code=400, detail="market必须是US或HK")
+        
+        # 获取该市场的所有订单
+        orders = longport_service.get_today_orders_by_market(market, mode=mode)
+        
+        # 过滤出当日订单（按市场时区的当日）
+        today_orders = []
+        for order in orders:
+            # 尝试从不同字段获取时间
+            order_time = None
+            for time_field in ["submitted_at", "created_at", "updated_at", "timestamp"]:
+                if time_field in order and order[time_field]:
+                    try:
+                        if isinstance(order[time_field], str):
+                            # 尝试解析ISO格式时间
+                            order_time = datetime.fromisoformat(order[time_field].replace("Z", "+00:00"))
+                        elif isinstance(order[time_field], datetime):
+                            order_time = order[time_field]
+                        if order_time:
+                            break
+                    except Exception:
+                        continue
+            
+            # 如果找到了时间且是当日，则加入
+            if order_time and _is_today_in_market_timezone(order_time, market):
+                today_orders.append(order)
+            elif not order_time:
+                # 如果没有时间字段，默认认为是当日（可能是实时订单）
+                today_orders.append(order)
+        
+        return {"orders": today_orders, "count": len(today_orders), "market": market}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        # RuntimeError 通常是凭证相关的友好错误信息
+        error_msg = str(e)
+        print(f"[ERROR] 凭证错误: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "credential" in error_str or "auth" in error_str or "unauthorized" in error_str:
+            raise HTTPException(status_code=400, detail=f"{mode}账户凭证验证失败，请检查账户凭证是否正确")
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 # ================== 实盘数据爬取任务 ==================
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo
 import os
 import uuid
 
@@ -1011,6 +1421,24 @@ def _duration_to_timedelta(duration: FetchDuration) -> Optional[timedelta]:
 
 def _fetch_file_path(task_id: str) -> str:
     return os.path.join(FETCH_DIR, f"{task_id}.txt")
+
+
+def _update_fetch_status(task_id: str, status: str) -> None:
+    """更新fetch任务文件中的状态"""
+    path = _fetch_file_path(task_id)
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if lines:
+            config = json.loads(lines[0].strip())
+            config["status"] = status
+            lines[0] = json.dumps(config, ensure_ascii=False) + "\n"
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+    except Exception as e:
+        print(f"Warning: Failed to update fetch task status in file {task_id}: {_format_error(e)}")
 
 
 def _write_fetch_header(task_id: str, info: FetchTaskInfo) -> None:
@@ -1127,6 +1555,28 @@ def _get_hk_session_name_cn(now_hk: datetime) -> str:
     return "休市"
 
 
+def _get_local_time(symbol: str, now_utc: datetime) -> datetime:
+    """
+    根据股票代码获取对应的本地时区时间
+    
+    Args:
+        symbol: 股票代码
+        now_utc: UTC时间
+    
+    Returns:
+        本地时区时间
+    """
+    if _is_us_stock(symbol):
+        # 美股：使用ET时区
+        return now_utc.astimezone(ZoneInfo("America/New_York"))
+    elif _is_hk_stock(symbol):
+        # 港股：使用HK时区
+        return now_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    else:
+        # 未知类型，默认使用UTC
+        return now_utc
+
+
 def _get_session_name_cn(symbol: str, now_utc: datetime) -> str:
     """
     根据股票代码和UTC时间获取交易时段（中文）
@@ -1167,7 +1617,9 @@ async def _run_fetch_task(task_id: str) -> None:
         while True:
             # 检查是否暂停
             if _fetch_task_paused.get(task_id, False):
-                meta["status"] = "paused"
+                if meta["status"] != "paused":
+                    meta["status"] = "paused"
+                    _update_fetch_status(task_id, "paused")
                 await asyncio.sleep(1)
                 continue
             
@@ -1176,6 +1628,7 @@ async def _run_fetch_task(task_id: str) -> None:
             meta["current_session"] = current_session
             if stop_at and now >= stop_at:
                 meta["status"] = "completed"
+                _update_fetch_status(task_id, "completed")
                 break
             # Gate by configured sessions; if not selected, wait 1s
             selected_sessions = meta.get("sessions") or []
@@ -1198,9 +1651,12 @@ async def _run_fetch_task(task_id: str) -> None:
             await asyncio.sleep(_interval_to_seconds(interval))
     except asyncio.CancelledError:
         meta["status"] = "stopped"
+        _update_fetch_status(task_id, "stopped")
         raise
     except Exception as e:
-        meta["status"] = f"error: {_format_error(e)}"
+        error_status = f"error: {_format_error(e)}"
+        meta["status"] = error_status
+        _update_fetch_status(task_id, error_status)
     finally:
         _fetch_task_handles.pop(task_id, None)
 
@@ -1328,6 +1784,8 @@ async def pause_fetch_task(task_id: str):
     if meta["status"] in ["stopped", "completed"]:
         raise HTTPException(status_code=400, detail="任务已停止或已完成，无法暂停")
     _fetch_task_paused[task_id] = True
+    meta["status"] = "paused"
+    _update_fetch_status(task_id, "paused")
     return {"message": "任务已暂停"}
 
 
@@ -1339,6 +1797,8 @@ async def resume_fetch_task(task_id: str):
     if meta["status"] in ["stopped", "completed"]:
         raise HTTPException(status_code=400, detail="任务已停止或已完成，无法恢复")
     _fetch_task_paused[task_id] = False
+    meta["status"] = "running"
+    _update_fetch_status(task_id, "running")
     return {"message": "任务已恢复"}
 
 
@@ -1351,11 +1811,822 @@ async def stop_fetch_task(task_id: str):
     if not handle:
         meta["status"] = "stopped"
         _fetch_task_paused.pop(task_id, None)
+        _update_fetch_status(task_id, "stopped")
         return {"message": "任务已停止"}
     try:
         handle.cancel()
         _fetch_task_paused.pop(task_id, None)
+        meta["status"] = "stopped"
+        _update_fetch_status(task_id, "stopped")
         return {"message": "已发送停止指令"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+
+@app.delete("/api/fetch/{task_id}")
+async def delete_fetch_task(task_id: str):
+    """删除爬取任务及其数据文件"""
+    try:
+        # 检查任务是否存在
+        meta = _fetch_tasks.get(task_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        
+        # 停止任务（如果正在运行）
+        if meta.get("status") == "running":
+            meta["status"] = "stopped"
+            task_handle = _fetch_task_handles.get(task_id)
+            if task_handle:
+                task_handle.cancel()
+        
+        # 从内存中删除
+        _fetch_tasks.pop(task_id, None)
+        _fetch_task_handles.pop(task_id, None)
+        _fetch_task_paused.pop(task_id, None)
+        
+        # 删除数据文件
+        file_path = _fetch_file_path(task_id)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        return {"message": "任务已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+
+# ================== 实时交易任务 ==================
+TRADE_DIR = os.path.join("logs", "trade")
+os.makedirs(TRADE_DIR, exist_ok=True)
+
+class TradeInterval(BaseModel):
+    value: int
+    unit: str  # 'seconds' | 'minutes' | 'hours'
+
+class TradeDuration(BaseModel):
+    mode: str  # 'permanent' | 'finite'
+    days: int = 0
+    hours: int = 0
+    minutes: int = 0
+    seconds: int = 0
+
+class TradeTaskCreateRequest(BaseModel):
+    symbol: str
+    mode: str = Field("paper", description="paper 或 live")
+    strategy_name: str
+    strategy_params: Dict = Field(default_factory=dict)
+    sessions: List[str] = Field(default_factory=list, description="盘前/盘中/盘后/夜盘 等")
+    duration: TradeDuration
+    price_interval: TradeInterval  # 采样股票价格的时间间隔
+    signal_interval: TradeInterval  # 产生信号的时间间隔
+    max_cache_size: int = Field(1000, description="最大缓存的股票数据数目")
+
+class TradeTaskInfo(BaseModel):
+    task_id: str
+    symbol: str
+    mode: str
+    strategy_name: str
+    strategy_params: Dict
+    sessions: List[str]
+    duration: TradeDuration
+    price_interval: TradeInterval
+    signal_interval: TradeInterval
+    max_cache_size: int
+    start_time: str
+    status: str  # running|stopped|completed|paused
+    file_path: str
+    timezone: str = "America/New_York"
+    current_session: str | None = None
+
+# 内存中的交易任务管理
+_trade_tasks: Dict[str, Dict] = {}
+_trade_task_handles: Dict[str, asyncio.Task] = {}
+_trade_task_paused: Dict[str, bool] = {}
+
+def _trade_file_path(task_id: str) -> str:
+    return os.path.join(TRADE_DIR, f"{task_id}.txt")
+
+def _write_trade_header(task_id: str, info: TradeTaskInfo) -> None:
+    """写入交易任务配置头部"""
+    os.makedirs(TRADE_DIR, exist_ok=True)
+    path = _trade_file_path(task_id)
+    config_dict = info.model_dump()
+    # 初始化metrics字段
+    config_dict["metrics"] = {
+        "total_trades": 0,
+        "buy_count": 0,
+        "sell_count": 0,
+        "win_rate": 0.0,
+        "total_profit": 0.0,
+        "total_return_rate": 0.0,
+        "profit_loss_ratio": 0.0,
+        "sharpe_ratio": 0.0,
+        "initial_cash": 100000.0,  # 默认初始资金
+        "current_cash": 100000.0,
+        "current_position": 0.0,
+        "current_asset_value": 100000.0,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(config_dict, ensure_ascii=False) + "\n")
+
+def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 100000.0) -> Dict:
+    """
+    计算交易指标
+    
+    Args:
+        trade_records: 交易记录列表
+        initial_cash: 初始资金
+    
+    Returns:
+        指标字典
+    """
+    if not trade_records:
+        return {
+            "total_trades": 0,
+            "buy_count": 0,
+            "sell_count": 0,
+            "win_rate": 0.0,
+            "total_profit": 0.0,
+            "total_return_rate": 0.0,
+            "profit_loss_ratio": 0.0,
+            "sharpe_ratio": 0.0,
+            "initial_cash": initial_cash,
+            "current_cash": initial_cash,
+            "current_position": 0.0,
+            "current_asset_value": initial_cash,
+        }
+    
+    # 统计买卖次数
+    buy_count = sum(1 for r in trade_records if r.get("trade_type") == "buy")
+    sell_count = sum(1 for r in trade_records if r.get("trade_type") == "sell")
+    total_trades = len(trade_records)
+    
+    # 计算持仓和现金（模拟交易）
+    cash = initial_cash
+    position = 0.0  # 持仓数量
+    position_cost = 0.0  # 持仓成本
+    completed_trades = []  # 已完成的交易（买入-卖出配对）
+    
+    # 记录买入订单
+    buy_orders = []
+    
+    for record in trade_records:
+        trade_type = record.get("trade_type")
+        price = record.get("price", 0.0)
+        
+        if trade_type == "buy" and price > 0:
+            # 假设使用30%的资金买入（可以根据策略调整）
+            buy_amount = cash * 0.3
+            commission = buy_amount * 0.001  # 0.1%手续费
+            actual_amount = buy_amount - commission
+            quantity = actual_amount / price
+            
+            cash -= buy_amount
+            position += quantity
+            position_cost += buy_amount
+            
+            buy_orders.append({
+                "price": price,
+                "quantity": quantity,
+                "amount": buy_amount,
+            })
+        
+        elif trade_type == "sell" and price > 0 and len(buy_orders) > 0:
+            # 卖出最近的买入订单
+            buy_order = buy_orders.pop(0)
+            sell_quantity = min(buy_order["quantity"], position)
+            sell_amount = sell_quantity * price
+            commission = sell_amount * 0.001
+            actual_sell_amount = sell_amount - commission
+            
+            cash += actual_sell_amount
+            position -= sell_quantity
+            
+            # 计算盈亏
+            buy_cost = buy_order["amount"]
+            profit = actual_sell_amount - buy_cost
+            completed_trades.append(profit)
+            
+            position_cost -= buy_cost * (sell_quantity / buy_order["quantity"])
+    
+    # 计算当前资产价值
+    current_price = trade_records[-1].get("price", 0.0) if trade_records else 0.0
+    current_asset_value = cash + (position * current_price if current_price > 0 else 0)
+    total_profit = current_asset_value - initial_cash
+    total_return_rate = (total_profit / initial_cash * 100) if initial_cash > 0 else 0.0
+    
+    # 计算胜率
+    winning_trades = sum(1 for p in completed_trades if p > 0)
+    win_rate = (winning_trades / len(completed_trades) * 100) if completed_trades else 0.0
+    
+    # 计算盈亏比
+    profits = [p for p in completed_trades if p > 0]
+    losses = [p for p in completed_trades if p < 0]
+    avg_profit = sum(profits) / len(profits) if profits else 0.0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
+    profit_loss_ratio = (avg_profit / avg_loss) if avg_loss > 0 else 0.0
+    
+    # 计算夏普比率（简化版，使用日收益率）
+    if len(completed_trades) > 1:
+        returns = [p / initial_cash for p in completed_trades]
+        avg_return = sum(returns) / len(returns)
+        variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
+        std_dev = variance ** 0.5
+        sharpe_ratio = (avg_return / std_dev) if std_dev > 0 else 0.0
+        # 年化（假设252个交易日）
+        sharpe_ratio = sharpe_ratio * (252 ** 0.5) if len(returns) > 1 else 0.0
+    else:
+        sharpe_ratio = 0.0
+    
+    return {
+        "total_trades": total_trades,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "win_rate": round(win_rate, 2),
+        "total_profit": round(total_profit, 2),
+        "total_return_rate": round(total_return_rate, 2),
+        "profit_loss_ratio": round(profit_loss_ratio, 2),
+        "sharpe_ratio": round(sharpe_ratio, 4),
+        "initial_cash": initial_cash,
+        "current_cash": round(cash, 2),
+        "current_position": round(position, 4),
+        "current_asset_value": round(current_asset_value, 2),
+    }
+
+def _update_trade_metrics(task_id: str, trade_records: List[Dict], initial_cash: float = 100000.0) -> None:
+    """
+    更新日志文件第一行的metrics字段
+    
+    Args:
+        task_id: 任务ID
+        trade_records: 交易记录列表
+        initial_cash: 初始资金
+    """
+    try:
+        path = _trade_file_path(task_id)
+        if not os.path.exists(path):
+            return
+        
+        # 读取文件
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        if not lines:
+            return
+        
+        # 解析第一行配置
+        config = json.loads(lines[0].strip())
+        
+        # 计算指标
+        metrics = _calculate_trade_metrics(trade_records, initial_cash)
+        
+        # 更新配置中的metrics
+        config["metrics"] = metrics
+        
+        # 写回第一行
+        lines[0] = json.dumps(config, ensure_ascii=False) + "\n"
+        
+        # 写回文件
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception as e:
+        # 静默失败，不影响主流程
+        import logging
+        logging.getLogger(__name__).warning(f"更新指标失败: {_format_error(e)}")
+
+def _append_trade_log(task_id: str, log_entry: Dict) -> None:
+    """追加交易日志"""
+    os.makedirs(TRADE_DIR, exist_ok=True)
+    path = _trade_file_path(task_id)
+    timestamp_str = log_entry.get("timestamp", "")
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        time_str = timestamp_str[:19] if len(timestamp_str) >= 19 else timestamp_str
+    
+    # 写入日志：时间,类型,详情（JSON格式）
+    log_type = log_entry.get("type", "log")
+    log_data = {k: v for k, v in log_entry.items() if k != "timestamp" and k != "type"}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{time_str},{log_type},{json.dumps(log_data, ensure_ascii=False)}\n")
+
+async def _run_trade_task(task_id: str) -> None:
+    """运行实时交易任务"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        return
+    
+    symbol = meta["symbol"]
+    mode = meta["mode"]
+    strategy_name = meta["strategy_name"]
+    strategy_params = meta["strategy_params"]
+    sessions = meta["sessions"]
+    duration_delta = meta["duration_delta"]
+    price_interval = meta["price_interval"]
+    signal_interval = meta["signal_interval"]
+    max_cache_size = meta["max_cache_size"]
+    started_at: datetime = meta["started_at"]
+    stop_at: Optional[datetime] = started_at + duration_delta if duration_delta else None
+    
+    # 创建策略实例
+    strategy_class = AVAILABLE_STRATEGIES.get(strategy_name)
+    if not strategy_class:
+        meta["status"] = f"error: 策略 {strategy_name} 不存在"
+        return
+    
+    # 确保策略参数类型正确（前端可能发送字符串类型的数值）
+    cleaned_params = {}
+    try:
+        # 获取策略的参数schema以确定参数类型
+        params_schema = strategy_class.get_params_schema()
+        for key, value in strategy_params.items():
+            if key in params_schema:
+                param_info = params_schema[key]
+                if param_info.get("type") == "number":
+                    # 转换为数字类型
+                    if isinstance(value, str):
+                        # 尝试转换为浮点数或整数
+                        if '.' in value or 'e' in value.lower():
+                            cleaned_params[key] = float(value)
+                        else:
+                            cleaned_params[key] = int(value)
+                    else:
+                        cleaned_params[key] = value
+                else:
+                    cleaned_params[key] = value
+            else:
+                # 未知参数，保持原值
+                cleaned_params[key] = value
+    except Exception as e:
+        # 如果参数清理失败，使用原始参数
+        cleaned_params = strategy_params
+        _append_trade_log(task_id, {
+            "timestamp": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "type": "error",
+            "error": f"参数清理警告: {_format_error(e)}"
+        })
+    
+    try:
+        strategy = strategy_class(name=strategy_name, **cleaned_params)
+    except Exception as e:
+        meta["status"] = f"error: 策略初始化失败: {_format_error(e)}"
+        _append_trade_log(task_id, {
+            "timestamp": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "type": "error",
+            "error": f"策略初始化失败: {_format_error(e)}"
+        })
+        return
+    
+    # 价格缓存和历史记录（存储在meta中以便实时访问）
+    if "price_cache" not in meta:
+        meta["price_cache"] = []
+        meta["price_timestamps"] = []
+    if "trade_records" not in meta:
+        meta["trade_records"] = []  # 专门的买卖交易记录列表
+    price_cache: List[float] = meta["price_cache"]
+    price_timestamps: List[str] = meta["price_timestamps"]
+    trade_records: List[dict] = meta["trade_records"]  # 实时维护的交易记录
+    trade_history: List[dict] = []  # 临时历史记录（用于策略计算）
+    last_signal_time: Optional[datetime] = None
+    
+    try:
+        while True:
+            # 检查是否暂停
+            if _trade_task_paused.get(task_id, False):
+                meta["status"] = "paused"
+                await asyncio.sleep(1)
+                continue
+            
+            now = datetime.now(ZoneInfo("UTC"))
+            current_session = _get_session_name_cn(symbol, now)
+            meta["current_session"] = current_session
+            
+            # 检查是否超时
+            if stop_at and now >= stop_at:
+                meta["status"] = "completed"
+                break
+            
+            # 检查交易时段
+            if sessions and current_session not in sessions:
+                meta["status"] = "waiting"
+                await asyncio.sleep(1)
+                continue
+            
+            meta["status"] = "running"
+            
+            # 按价格采样间隔获取价格
+            price_interval_seconds = _interval_to_seconds(price_interval)
+            current_time_seconds = now.timestamp()
+            
+            # 获取最新价格
+            try:
+                q = longport_service.get_last_done_for_session(symbol, current_session, mode=mode)
+                last_done = q.get("last_done")
+                
+                if last_done is not None:
+                    # 根据股票代码选择对应的时区时间进行记录
+                    now_local = _get_local_time(symbol, now)
+                    
+                    # 添加到缓存（限制大小）
+                    price_cache.append(float(last_done))
+                    price_timestamps.append(now_local.isoformat())
+                    
+                    # 确保缓存大小不超过max_cache_size
+                    while len(price_cache) > max_cache_size:
+                        price_cache.pop(0)
+                    while len(price_timestamps) > max_cache_size:
+                        price_timestamps.pop(0)
+                    
+                    # 确保两个列表长度一致
+                    if len(price_cache) != len(price_timestamps):
+                        min_len = min(len(price_cache), len(price_timestamps))
+                        price_cache = price_cache[:min_len]
+                        price_timestamps = price_timestamps[:min_len]
+                        meta["price_cache"] = price_cache
+                        meta["price_timestamps"] = price_timestamps
+                    
+                    # 记录价格采样（使用本地时区时间）
+                    _append_trade_log(task_id, {
+                        "timestamp": now_local.isoformat(),
+                        "type": "price_sample",
+                        "price": last_done,
+                        "session": current_session,
+                        "cache_size": len(price_cache)
+                    })
+            except Exception as e:
+                # 使用本地时区时间记录错误
+                now_local = _get_local_time(symbol, now)
+                _append_trade_log(task_id, {
+                    "timestamp": now_local.isoformat(),
+                    "type": "error",
+                    "error": f"获取价格失败: {_format_error(e)}"
+                })
+            
+            # 按信号间隔运行策略产生信号
+            signal_interval_seconds = _interval_to_seconds(signal_interval)
+            should_generate_signal = False
+            
+            if last_signal_time is None:
+                should_generate_signal = True
+            else:
+                elapsed = (now - last_signal_time).total_seconds()
+                if elapsed >= signal_interval_seconds:
+                    should_generate_signal = True
+            
+            if should_generate_signal and len(price_cache) >= 2:
+                try:
+                    # 使用本地时区时间用于信号和交易记录
+                    now_local = _get_local_time(symbol, now)
+                    
+                    # 运行策略生成信号
+                    current_index = len(price_cache) - 1
+                    signal, strategy_info = strategy.generate_signal(price_cache, current_index, trade_history)
+                    
+                    # 记录信号
+                    _append_trade_log(task_id, {
+                        "timestamp": now_local.isoformat(),
+                        "type": "strategy_signal",
+                        "signal": signal.value,
+                        "price": price_cache[current_index],
+                        "strategy_info": strategy_info,
+                        "cache_size": len(price_cache)
+                    })
+                    
+                    # 如果是买卖信号，执行交易（这里可以扩展为实际下单）
+                    if signal.value in ["buy", "sell"]:
+                        trade_entry = {
+                            "timestamp": now_local.isoformat(),
+                            "type": "trade",
+                            "trade_type": signal.value,
+                            "price": price_cache[current_index],
+                            "signal_info": strategy_info,
+                            "session": current_session
+                        }
+                        trade_history.append(trade_entry)  # 用于策略计算
+                        trade_records.append(trade_entry)  # 添加到专门的交易记录列表
+                        _append_trade_log(task_id, trade_entry)  # 写入日志文件（用于持久化）
+                        
+                        # 更新实时指标
+                        initial_cash = meta.get("initial_cash", 100000.0)
+                        _update_trade_metrics(task_id, trade_records, initial_cash)
+                    
+                    last_signal_time = now
+                except Exception as e:
+                    # 使用本地时区时间记录错误
+                    now_local = _get_local_time(symbol, now)
+                    _append_trade_log(task_id, {
+                        "timestamp": now_local.isoformat(),
+                        "type": "error",
+                        "error": f"策略执行失败: {_format_error(e)}"
+                    })
+            
+            # 等待价格采样间隔
+            await asyncio.sleep(price_interval_seconds)
+            
+    except asyncio.CancelledError:
+        meta["status"] = "stopped"
+        raise
+    except Exception as e:
+        meta["status"] = f"error: {_format_error(e)}"
+        # 使用本地时区时间记录错误
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        now_local = _get_local_time(symbol, now_utc)
+        _append_trade_log(task_id, {
+            "timestamp": now_local.isoformat(),
+            "type": "error",
+            "error": f"任务异常: {_format_error(e)}"
+        })
+    finally:
+        _trade_task_handles.pop(task_id, None)
+
+@app.post("/api/trade/create")
+async def create_trade_task(req: TradeTaskCreateRequest):
+    """创建实时交易任务"""
+    try:
+        # 基本校验
+        if req.price_interval.value <= 0:
+            raise HTTPException(status_code=400, detail="price_interval.value 必须为正整数")
+        if req.signal_interval.value <= 0:
+            raise HTTPException(status_code=400, detail="signal_interval.value 必须为正整数")
+        if req.max_cache_size <= 0:
+            raise HTTPException(status_code=400, detail="max_cache_size 必须为正整数")
+        
+        # 验证策略
+        if req.strategy_name not in AVAILABLE_STRATEGIES:
+            raise HTTPException(status_code=400, detail=f"策略 {req.strategy_name} 不存在")
+        
+        duration_delta = _duration_to_timedelta(req.duration)
+        
+        # 生成8位任务ID
+        task_id = str(uuid.uuid4())[:8]
+        started_at = datetime.now(ZoneInfo("UTC"))
+        
+        # 根据股票代码确定时区
+        if _is_us_stock(req.symbol):
+            timezone = "America/New_York"
+        elif _is_hk_stock(req.symbol):
+            timezone = "Asia/Hong_Kong"
+        else:
+            timezone = "America/New_York"
+        
+        info = TradeTaskInfo(
+            task_id=task_id,
+            symbol=req.symbol,
+            mode=req.mode,
+            strategy_name=req.strategy_name,
+            strategy_params=req.strategy_params,
+            sessions=req.sessions,
+            duration=req.duration,
+            price_interval=req.price_interval,
+            signal_interval=req.signal_interval,
+            max_cache_size=req.max_cache_size,
+            start_time=started_at.isoformat(),
+            status="running",
+            file_path=_trade_file_path(task_id),
+            timezone=timezone,
+            current_session=None,
+        )
+        
+        _trade_tasks[task_id] = {
+            "symbol": req.symbol,
+            "mode": req.mode,
+            "strategy_name": req.strategy_name,
+            "strategy_params": req.strategy_params,
+            "sessions": req.sessions,
+            "duration": req.duration,
+            "duration_delta": duration_delta,
+            "price_interval": req.price_interval,
+            "signal_interval": req.signal_interval,
+            "max_cache_size": req.max_cache_size,
+            "started_at": started_at,
+            "status": "running",
+            "file_path": info.file_path,
+            "price_cache": [],  # 初始化价格缓存
+            "price_timestamps": [],  # 初始化时间戳缓存
+            "trade_records": [],  # 初始化交易记录列表（只包含买卖交易）
+            "initial_cash": 100000.0,  # 默认初始资金
+        }
+        _trade_task_paused[task_id] = False
+        
+        _write_trade_header(task_id, info)
+        
+        # 启动后台任务
+        task = asyncio.create_task(_run_trade_task(task_id))
+        _trade_task_handles[task_id] = task
+        
+        return {"task_id": task_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+@app.get("/api/trade/list")
+async def list_trade_tasks():
+    """获取所有交易任务列表"""
+    summaries = []
+    for task_id, meta in _trade_tasks.items():
+        summaries.append({
+            "task_id": task_id,
+            "symbol": meta["symbol"],
+            "mode": meta["mode"],
+            "strategy_name": meta["strategy_name"],
+            "sessions": meta["sessions"],
+            "status": meta["status"],
+            "started_at": meta["started_at"].isoformat(),
+            "current_session": meta.get("current_session"),
+        })
+    return {"tasks": summaries, "count": len(summaries)}
+
+@app.get("/api/trade/{task_id}")
+async def get_trade_task(task_id: str):
+    """获取交易任务详情 - 完全从内存缓存获取实时数据"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    try:
+        # 从meta构建配置信息（不从文件读取）
+        config = {
+            "task_id": task_id,
+            "symbol": meta.get("symbol"),
+            "mode": meta.get("mode"),
+            "strategy_name": meta.get("strategy_name"),
+            "strategy_params": meta.get("strategy_params", {}),
+            "sessions": meta.get("sessions", []),
+            "duration": meta.get("duration"),
+            "price_interval": meta.get("price_interval"),
+            "signal_interval": meta.get("signal_interval"),
+            "max_cache_size": meta.get("max_cache_size", 1000),
+            "start_time": meta.get("started_at").isoformat() if meta.get("started_at") else None,
+            "status": meta.get("status", "unknown"),
+        }
+        
+        # 只从内存缓存获取价格数据
+        price_cache = meta.get("price_cache", [])
+        price_timestamps = meta.get("price_timestamps", [])
+        
+        # 调试信息
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Task {task_id}: price_cache length={len(price_cache) if price_cache else 0}, price_timestamps length={len(price_timestamps) if price_timestamps else 0}")
+        
+        # 从内存缓存构建价格点
+        latest_prices = []
+        if price_cache and price_timestamps and len(price_cache) == len(price_timestamps):
+            max_cache_size = meta.get("max_cache_size", 1000)
+            # 取最近的数据（最多max_cache_size条）
+            start_idx = max(0, len(price_cache) - max_cache_size)
+            for i in range(start_idx, len(price_cache)):
+                # 转换时间戳格式为字符串（从ISO格式转换为显示格式）
+                timestamp_str = price_timestamps[i]
+                try:
+                    # 如果是ISO格式，转换为显示格式
+                    if isinstance(timestamp_str, str):
+                        if 'T' in timestamp_str or '+' in timestamp_str:
+                            dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception as e:
+                    # 如果转换失败，保持原格式
+                    pass
+                
+                price_value = price_cache[i]
+                if price_value is not None:
+                    latest_prices.append({
+                        "timestamp": str(timestamp_str),
+                        "price": float(price_value),
+                        "session": meta.get("current_session", ""),
+                    })
+        
+        # 直接从内存中的交易记录列表获取（只包含买卖交易，不包括持有信号）
+        trade_records = meta.get("trade_records", [])
+        
+        # 转换为前端需要的格式，按时间降序
+        trade_logs = []
+        for record in reversed(trade_records):  # 反转列表使其按时间降序
+            trade_logs.append({
+                "timestamp": record.get("timestamp", ""),
+                "type": record.get("type", "trade"),
+                "trade_type": record.get("trade_type"),
+                "price": record.get("price"),
+                "signal_info": record.get("signal_info", {}),
+                "session": record.get("session", ""),
+            })
+        
+        # 如果current_session为None，尝试计算当前时段
+        current_session = meta.get("current_session")
+        if current_session is None and meta:
+            symbol = meta.get("symbol")
+            if symbol:
+                try:
+                    now = datetime.now(ZoneInfo("UTC"))
+                    current_session = _get_session_name_cn(symbol, now)
+                except Exception:
+                    pass
+        
+        # 读取metrics（从日志文件第一行或实时计算）
+        metrics = None
+        try:
+            path = _trade_file_path(task_id)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                    if first_line:
+                        file_config = json.loads(first_line)
+                        metrics = file_config.get("metrics")
+        except Exception:
+            pass
+        
+        # 如果文件中的metrics不存在或过期，实时计算
+        if not metrics:
+            trade_records = meta.get("trade_records", [])
+            initial_cash = meta.get("initial_cash", 100000.0)
+            metrics = _calculate_trade_metrics(trade_records, initial_cash)
+        
+        return {
+            "config": config,
+            "latest_points": latest_prices,
+            "trade_logs": trade_logs,
+            "count": len(latest_prices),
+            "current_session": current_session,
+            "metrics": metrics,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+@app.post("/api/trade/{task_id}/pause")
+async def pause_trade_task(task_id: str):
+    """暂停交易任务"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if meta["status"] in ["stopped", "completed"]:
+        raise HTTPException(status_code=400, detail="任务已停止或已完成，无法暂停")
+    _trade_task_paused[task_id] = True
+    meta["status"] = "paused"
+    return {"message": "任务已暂停"}
+
+@app.post("/api/trade/{task_id}/resume")
+async def resume_trade_task(task_id: str):
+    """恢复交易任务"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if meta["status"] in ["stopped", "completed"]:
+        raise HTTPException(status_code=400, detail="任务已停止或已完成，无法恢复")
+    _trade_task_paused[task_id] = False
+    # 状态会在_run_trade_task中自动更新为running
+    return {"message": "任务已恢复"}
+
+@app.post("/api/trade/{task_id}/stop")
+async def stop_trade_task(task_id: str):
+    """停止交易任务"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    handle = _trade_task_handles.get(task_id)
+    if not handle:
+        meta["status"] = "stopped"
+        _trade_task_paused.pop(task_id, None)
+        return {"message": "任务已停止"}
+    try:
+        handle.cancel()
+        meta["status"] = "stopped"
+        _trade_task_paused.pop(task_id, None)
+        return {"message": "已发送停止指令"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+@app.delete("/api/trade/{task_id}")
+async def delete_trade_task(task_id: str):
+    """删除交易任务及其日志文件"""
+    try:
+        # 检查任务是否存在
+        meta = _trade_tasks.get(task_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        
+        # 停止任务（如果正在运行）
+        if meta.get("status") == "running":
+            meta["status"] = "stopped"
+            task_handle = _trade_task_handles.get(task_id)
+            if task_handle:
+                task_handle.cancel()
+        
+        # 从内存中删除
+        _trade_tasks.pop(task_id, None)
+        _trade_task_handles.pop(task_id, None)
+        _trade_task_paused.pop(task_id, None)
+        
+        # 删除日志文件
+        log_file_path = _trade_file_path(task_id)
+        if os.path.exists(log_file_path):
+            os.remove(log_file_path)
+        
+        return {"message": "任务已删除"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=_format_error(e))
 

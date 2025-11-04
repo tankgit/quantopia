@@ -11,3 +11,41 @@ build/
 logs/
 stock_data/
 
+# Python cache/bytecode files
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Cython build results
+build/
+*.c
+*.so
+
+# Python egg files
+*.egg
+*.egg-info/
+dist/
+.eggs/
+
+# pipenv/poetry/uv
+Pipfile.lock
+poetry.lock
+.uv/
+
+# pytest cache
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+

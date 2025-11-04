@@ -189,3 +189,116 @@ export interface FetchTaskDetailResponse {
   count: number;
 }
 
+// 实时交易任务类型
+export interface TradeInterval {
+  value: number;
+  unit: 'seconds' | 'minutes' | 'hours';
+}
+
+export interface TradeDuration {
+  mode: 'permanent' | 'finite';
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+}
+
+export interface TradeTaskCreateRequest {
+  symbol: string;
+  mode: 'paper' | 'live';
+  strategy_name: string;
+  strategy_params: Record<string, any>;
+  sessions: string[];
+  duration: TradeDuration;
+  price_interval: TradeInterval;
+  signal_interval: TradeInterval;
+  max_cache_size: number;
+}
+
+export interface TradeTaskSummary {
+  task_id: string;
+  symbol: string;
+  mode: 'paper' | 'live';
+  strategy_name: string;
+  sessions: string[];
+  status: string;
+  started_at: string;
+  current_session?: string;
+}
+
+export interface TradeMetrics {
+  total_trades: number;
+  buy_count: number;
+  sell_count: number;
+  win_rate: number;
+  total_profit: number;
+  total_return_rate: number;
+  profit_loss_ratio: number;
+  sharpe_ratio: number;
+  initial_cash: number;
+  current_cash: number;
+  current_position: number;
+  current_asset_value: number;
+}
+
+export interface TradeTaskDetailResponse {
+  config: any;
+  latest_points: Array<{ timestamp: string; price: number | null; session?: string }>;
+  trade_logs: Array<{
+    timestamp: string;
+    type: string;
+    [key: string]: any;
+  }>;
+  count: number;
+  current_session?: string;
+  metrics?: TradeMetrics;
+}
+
+// 账户管理类型
+export interface AccountInfo {
+  market: 'US' | 'HK';
+  currency: string;
+  total_cash: number;
+  available_cash: number;
+  market_value: number;
+  total_asset: number;
+  position_count: number;
+}
+
+export interface AccountAssets {
+  market: 'US' | 'HK';
+  currency: string;
+  total_cash: number;
+  available_cash: number;
+  frozen_cash: number;
+  market_value: number;
+  total_asset: number;
+  position_count: number;
+}
+
+export interface Position {
+  symbol: string;
+  quantity: number;
+  available_quantity: number;
+  cost_price: number;
+  current_price: number;
+  market_value: number;
+  [key: string]: any;
+}
+
+export interface Order {
+  order_id?: string;
+  symbol: string;
+  side?: string;
+  quantity?: number;
+  filled_quantity?: number;
+  price?: number;
+  executed_price?: number;
+  status?: string;
+  submitted_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  timestamp?: string;
+  [key: string]: any;
+}
+

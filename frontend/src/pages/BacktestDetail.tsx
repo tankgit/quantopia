@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faArrowLeft, faChartLine, faRobot, faEye, faEyeSlash, faCog, faDownload } from '@fortawesome/free-solid-svg-icons';
+import { faArrowLeft, faChartLine, faRobot, faEye, faEyeSlash, faCog, faDownload, faTrash } from '@fortawesome/free-solid-svg-icons';
 import { backtestApi, dataApi } from '../services/api';
 import DataChart from '../components/DataChart';
 import { formatCurrency, getValueColor } from '../utils/format';
@@ -52,6 +52,7 @@ export default function BacktestDetail() {
     total: number;
     current: number;
   } | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const { data: backtest, isLoading } = useQuery({
@@ -64,6 +65,15 @@ export default function BacktestDetail() {
     queryKey: ['data', backtest?.config.data_file_id],
     queryFn: () => dataApi.get(backtest!.config.data_file_id),
     enabled: !!backtest,
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (runId: string) => backtestApi.delete(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtestList'] });
+      setShowDeleteConfirm(false);
+      navigate('/backtests');
+    },
   });
 
   // 计算每笔交易的盈亏（用于显示win/loss）
@@ -421,18 +431,28 @@ export default function BacktestDetail() {
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <div>
+        <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/backtests')}
-            className="text-slate-400 hover:text-white mb-3 flex items-center gap-2 transition-colors"
+            className="px-4 py-2 rounded-xl bg-slate-700/60 text-white hover:bg-slate-700/80 flex items-center justify-center"
+            title="返回"
           >
             <FontAwesomeIcon icon={faArrowLeft} className="w-4 h-4" />
-            返回列表
           </button>
-          <h1 className="text-4xl font-bold text-white mb-2">回测详情</h1>
-          <div className="text-slate-500 font-mono text-sm">{runId}</div>
+          <div>
+            <h1 className="text-4xl font-bold text-white mb-2">回测详情</h1>
+            <div className="text-slate-500 font-mono text-sm">{runId}</div>
+          </div>
         </div>
         <div className="flex gap-3">
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={deleteMutation.isPending}
+            className="px-4 py-2 rounded-xl bg-red-600/60 border border-red-400/40 text-white hover:bg-red-600/80 flex items-center justify-center disabled:opacity-50"
+            title="删除回测"
+          >
+            <FontAwesomeIcon icon={faTrash} className="w-4 h-4" />
+          </button>
           <button
             className="px-6 py-3 rounded-2xl bg-gradient-to-r from-purple-500 to-violet-600 text-white shadow-sm shadow-purple-500/15 flex items-center gap-3 font-semibold transition-all duration-300 border border-purple-400/40"
           >
@@ -661,6 +681,37 @@ export default function BacktestDetail() {
             </div>
             <div className="text-slate-300 whitespace-pre-wrap leading-relaxed">
               {selectedTradeSummary || '请先点击`AI分析`按钮进行回测结果的分析'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 删除确认对话框 */}
+      {showDeleteConfirm && runId && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 rounded-2xl p-8 border border-slate-700 shadow-2xl max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-white mb-4">确认删除回测记录</h3>
+            <p className="text-slate-300 mb-6">
+              确定要删除回测记录 <span className="font-mono text-white">{runId}</span> 吗？此操作将删除回测及其所有数据，且不可恢复。
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => {
+                  if (runId) {
+                    deleteMutation.mutate(runId);
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {deleteMutation.isPending ? '删除中...' : '确认删除'}
+              </button>
             </div>
           </div>
         </div>

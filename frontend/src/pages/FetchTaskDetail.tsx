@@ -1,8 +1,8 @@
 import { useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faPause, faPlay, faStop } from '@fortawesome/free-solid-svg-icons';
+import { faArrowLeft, faPause, faPlay, faStop, faRotateRight } from '@fortawesome/free-solid-svg-icons';
 import { fetchApi } from '../services/api';
 import {
   LineChart,
@@ -16,6 +16,7 @@ import {
 
 export default function FetchTaskDetail() {
   const { taskId } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const { data, isLoading, refetch } = useQuery({
@@ -131,43 +132,53 @@ export default function FetchTaskDetail() {
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-white">爬取任务详情</h1>
-          <p className="text-slate-400 text-sm mt-1">任务ID：{cfg.task_id}</p>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => navigate('/data')}
+            className="px-4 py-2 rounded-xl bg-slate-700/60 text-white hover:bg-slate-700/80 flex items-center justify-center"
+            title="返回"
+          >
+            <FontAwesomeIcon icon={faArrowLeft} className="w-4 h-4" />
+          </button>
+          <div>
+            <h1 className="text-3xl font-bold text-white">爬取任务详情</h1>
+            <p className="text-slate-400 text-sm mt-1">任务ID：{cfg.task_id}</p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {cfg.status === 'running' && (
             <button
               onClick={() => pauseMutation.mutate(taskId!)}
-              className="px-4 py-2 rounded-xl bg-yellow-600/60 border border-yellow-400/40 text-white hover:bg-yellow-600/80 flex items-center gap-2"
+              className="px-4 py-2 rounded-xl bg-yellow-600/60 border border-yellow-400/40 text-white hover:bg-yellow-600/80 flex items-center justify-center"
+              title="暂停"
             >
               <FontAwesomeIcon icon={faPause} className="w-4 h-4" />
-              暂停
             </button>
           )}
           {cfg.status === 'paused' && (
             <button
               onClick={() => resumeMutation.mutate(taskId!)}
-              className="px-4 py-2 rounded-xl bg-emerald-600/60 border border-emerald-400/40 text-white hover:bg-emerald-600/80 flex items-center gap-2"
+              className="px-4 py-2 rounded-xl bg-emerald-600/60 border border-emerald-400/40 text-white hover:bg-emerald-600/80 flex items-center justify-center"
+              title="恢复"
             >
               <FontAwesomeIcon icon={faPlay} className="w-4 h-4" />
-              恢复
             </button>
           )}
           {cfg.status !== 'stopped' && cfg.status !== 'completed' && !cfg.status?.startsWith('error') && (
             <button
               onClick={() => stopMutation.mutate(taskId!)}
-              className="px-4 py-2 rounded-xl bg-red-600/60 border border-red-400/40 text-white hover:bg-red-600/80 flex items-center gap-2"
+              className="px-4 py-2 rounded-xl bg-red-600/60 border border-red-400/40 text-white hover:bg-red-600/80 flex items-center justify-center"
+              title="停止"
             >
               <FontAwesomeIcon icon={faStop} className="w-4 h-4" />
-              停止
             </button>
           )}
           <button
             onClick={() => refetch()}
-            className="px-4 py-2 rounded-xl bg-slate-700/60 border border-slate-600/50 text-white hover:bg-slate-700/80"
+            className="px-4 py-2 rounded-xl bg-slate-700/60 border border-slate-600/50 text-white hover:bg-slate-700/80 flex items-center justify-center"
+            title="刷新"
           >
-            刷新
+            <FontAwesomeIcon icon={faRotateRight} className="w-4 h-4" />
           </button>
         </div>
       </div>

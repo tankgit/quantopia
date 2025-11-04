@@ -284,18 +284,18 @@ export default function DataChart({
               <Line
                 type="monotone"
                 dataKey="buyMarker"
-                stroke="#10b981"
+                stroke="#ef4444"
                 strokeWidth={0}
-                dot={{ fill: '#10b981', r: 4, strokeWidth: 1, stroke: '#059669' }}
+                dot={{ fill: '#ef4444', r: 4, strokeWidth: 1, stroke: '#dc2626' }}
                 name="买入"
                 connectNulls={false}
               />
               <Line
                 type="monotone"
                 dataKey="sellMarker"
-                stroke="#ef4444"
+                stroke="#10b981"
                 strokeWidth={0}
-                dot={{ fill: '#ef4444', r: 4, strokeWidth: 1, stroke: '#dc2626' }}
+                dot={{ fill: '#10b981', r: 4, strokeWidth: 1, stroke: '#059669' }}
                 name="卖出"
                 connectNulls={false}
               />

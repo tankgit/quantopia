@@ -1,7 +1,7 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { faChartLine, faLightbulb, faHistory } from '@fortawesome/free-solid-svg-icons';
+import { faChartLine, faLightbulb, faHistory, faExchangeAlt, faWallet } from '@fortawesome/free-solid-svg-icons';
 
 interface LayoutProps {
   children: ReactNode;
@@ -12,6 +12,8 @@ export default function Layout({ children }: LayoutProps) {
     { path: '/data', label: '数据管理', icon: faChartLine, theme: 'blue' },
     { path: '/strategies', label: '策略库', icon: faLightbulb, theme: 'red' },
     { path: '/backtests', label: '回测管理', icon: faHistory, theme: 'purple' },
+    { path: '/trades', label: '实时交易', icon: faExchangeAlt, theme: 'green' },
+    { path: '/account', label: '我的资产', icon: faWallet, theme: 'cyan' },
   ];
 
   const getActiveClasses = (theme: string, isActive: boolean) => {
@@ -26,6 +28,10 @@ export default function Layout({ children }: LayoutProps) {
         return 'bg-gradient-to-r from-red-500 to-rose-600 text-white shadow-sm shadow-red-500/20 scale-105 border border-red-400/40';
       case 'purple':
         return 'bg-gradient-to-r from-purple-500 to-violet-600 text-white shadow-sm shadow-purple-500/20 scale-105 border border-purple-400/40';
+      case 'green':
+        return 'bg-gradient-to-r from-orange-500 to-amber-600 text-white shadow-sm shadow-orange-500/20 scale-105 border border-orange-400/40';
+      case 'cyan':
+        return 'bg-gradient-to-r from-cyan-500 to-teal-600 text-white shadow-sm shadow-cyan-500/20 scale-105 border border-cyan-400/40';
       default:
         return 'bg-gradient-to-r from-blue-500 to-indigo-600 text-white shadow-sm shadow-blue-500/20 scale-105 border border-blue-400/40';
     }
