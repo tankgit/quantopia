@@ -121,14 +121,15 @@ class StockDataGenerator:
         with open(file_path, 'w', encoding='utf-8') as f:
             # 第一行：metadata（JSON格式）
             f.write(json.dumps(metadata, ensure_ascii=False) + "\n")
-            # 第二行：数据（逗号分隔）
-            f.write(",".join([str(p) for p in prices]) + "\n")
+            # 后续行：每行一个数据点，格式：,,价格（时间栏和交易时段为空）
+            for price in prices:
+                f.write(f",,{price}\n")
         
         return file_id
     
     def load_data(self, file_id: str):
         """
-        加载生成的数据文件
+        加载数据文件（生成的数据或爬取的实盘数据）
         
         Args:
             file_id: 文件ID
@@ -136,16 +137,44 @@ class StockDataGenerator:
         Returns:
             (metadata, prices): 元数据字典和价格列表
         """
+        # 先尝试从生成数据目录加载
         file_path = os.path.join(self.output_dir, f"{file_id}.txt")
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Data file not found: {file_id}")
+            # 如果生成数据目录不存在，尝试从爬取数据目录加载
+            fetch_dir = os.path.join("stock_data", "fetch")
+            fetch_path = os.path.join(fetch_dir, f"{file_id}.txt")
+            if os.path.exists(fetch_path):
+                file_path = fetch_path
+            else:
+                raise FileNotFoundError(f"Data file not found: {file_id}")
         
         with open(file_path, 'r', encoding='utf-8') as f:
-            metadata_line = f.readline().strip()
-            data_line = f.readline().strip()
+            lines = f.readlines()
         
-        metadata = json.loads(metadata_line)
-        prices = [float(x) for x in data_line.split(",")]
+        # 第一行是metadata
+        metadata = json.loads(lines[0].strip())
+        
+        # 解析数据点
+        prices = []
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",", 2)
+            if len(parts) < 3:
+                # 兼容旧格式：如果只有一行逗号分隔的数据
+                if len(parts) == 1 and parts[0]:
+                    # 可能是旧格式：一行包含多个价格
+                    prices.extend([float(x) for x in parts[0].split(",") if x.strip()])
+                    break
+                continue
+            # 新格式：,,价格 或 时间,交易时段,价格
+            price_str = parts[2].strip()
+            if price_str:
+                try:
+                    prices.append(float(price_str))
+                except ValueError:
+                    continue
         
         return metadata, prices
     

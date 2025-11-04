@@ -1,1 +1,0 @@
-{"task_id": "dc791c19", "symbol": "AAPL.US", "mode": "paper", "interval": {"value": 5, "unit": "seconds"}, "sessions": ["盘中", "盘前"], "duration": {"mode": "permanent", "days": 0, "hours": 0, "minutes": 0, "seconds": 0}, "start_time": "2025-11-03T20:01:59.143968", "status": "running", "file_path": "stock_data/fetch/dc791c19.txt"}

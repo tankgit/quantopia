@@ -1,1 +1,0 @@
-{"task_id": "7789036b", "symbol": "AAPL.US", "mode": "paper", "interval": {"value": 5, "unit": "seconds"}, "sessions": ["盘前"], "duration": {"mode": "permanent", "days": 0, "hours": 0, "minutes": 0, "seconds": 0}, "start_time": "2025-11-03T19:25:16.966750", "status": "running", "file_path": "stock_data/fetch/7789036b.txt"}

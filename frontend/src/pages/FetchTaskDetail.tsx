@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import { useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faPause, faPlay, faStop } from '@fortawesome/free-solid-svg-icons';
 import { fetchApi } from '../services/api';
 import {
   LineChart,
@@ -14,6 +16,7 @@ import {
 
 export default function FetchTaskDetail() {
   const { taskId } = useParams();
+  const queryClient = useQueryClient();
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['fetchTask', taskId],
@@ -22,9 +25,63 @@ export default function FetchTaskDetail() {
     refetchInterval: 5000,
   });
 
+  const pauseMutation = useMutation({
+    mutationFn: fetchApi.pause,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fetchTask', taskId] });
+      queryClient.invalidateQueries({ queryKey: ['fetchTasks'] });
+      refetch(); // 立即刷新数据
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: fetchApi.resume,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fetchTask', taskId] });
+      queryClient.invalidateQueries({ queryKey: ['fetchTasks'] });
+      refetch(); // 立即刷新数据
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: fetchApi.stop,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fetchTask', taskId] });
+      queryClient.invalidateQueries({ queryKey: ['fetchTasks'] });
+      refetch(); // 立即刷新数据
+    },
+  });
+
   const chartData = useMemo(() => {
     if (!data?.latest_points) return [];
-    return data.latest_points.map((p, idx) => ({ index: idx, price: p.price ?? null, ts: p.timestamp }));
+    return data.latest_points.map((p, idx) => {
+      // 解析时间戳，支持 "YYYY-MM-DD HH:MM:SS" 格式
+      let dateStr = idx.toString();
+      if (p.timestamp) {
+        try {
+          // 尝试解析时间戳
+          const date = new Date(p.timestamp.replace(' ', 'T'));
+          if (!isNaN(date.getTime())) {
+            dateStr = date.toLocaleString('zh-CN', { 
+              month: 'short', 
+              day: 'numeric', 
+              hour: '2-digit', 
+              minute: '2-digit' 
+            });
+          }
+        } catch (e) {
+          // 如果解析失败，使用原始时间戳
+          dateStr = p.timestamp;
+        }
+      }
+      
+      return {
+        index: idx,
+        date: dateStr,
+        timestamp: p.timestamp,
+        price: p.price ?? null,
+      };
+    }).filter(d => d.price !== null);
   }, [data]);
 
   const yDomain = useMemo(() => {
@@ -37,11 +94,7 @@ export default function FetchTaskDetail() {
     return [min - pad, max + pad];
   }, [chartData]);
 
-  if (isLoading || !data) {
-    return <div className="text-slate-300">加载中...</div>;
-  }
-
-  const cfg = data.config || {};
+  const cfg = data?.config || {};
   const durationText = useMemo(() => {
     const d = cfg.duration || {};
     if (d.mode === 'permanent') return '永久';
@@ -53,6 +106,28 @@ export default function FetchTaskDetail() {
     return parts.length ? parts.join('') : '未设置';
   }, [cfg]);
 
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0]?.payload;
+      const timestamp = data?.timestamp || label;
+      return (
+        <div className="bg-slate-800 border border-slate-700 rounded-lg p-3 shadow-xl">
+          <p className="text-slate-300 text-sm mb-2">时间: {timestamp}</p>
+          {payload.map((entry: any, index: number) => (
+            <p key={index} className="text-white text-sm" style={{ color: entry.color }}>
+              {entry.name} ($): {entry.value?.toFixed(3) || 'N/A'}
+            </p>
+          ))}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  if (isLoading || !data) {
+    return <div className="text-slate-300">加载中...</div>;
+  }
+
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
@@ -60,12 +135,41 @@ export default function FetchTaskDetail() {
           <h1 className="text-3xl font-bold text-white">爬取任务详情</h1>
           <p className="text-slate-400 text-sm mt-1">任务ID：{cfg.task_id}</p>
         </div>
-        <button
-          onClick={() => refetch()}
-          className="px-4 py-2 rounded-xl bg-slate-700/60 border border-slate-600/50 text-white hover:bg-slate-700/80"
-        >
-          刷新
-        </button>
+        <div className="flex items-center gap-2">
+          {cfg.status === 'running' && (
+            <button
+              onClick={() => pauseMutation.mutate(taskId!)}
+              className="px-4 py-2 rounded-xl bg-yellow-600/60 border border-yellow-400/40 text-white hover:bg-yellow-600/80 flex items-center gap-2"
+            >
+              <FontAwesomeIcon icon={faPause} className="w-4 h-4" />
+              暂停
+            </button>
+          )}
+          {cfg.status === 'paused' && (
+            <button
+              onClick={() => resumeMutation.mutate(taskId!)}
+              className="px-4 py-2 rounded-xl bg-emerald-600/60 border border-emerald-400/40 text-white hover:bg-emerald-600/80 flex items-center gap-2"
+            >
+              <FontAwesomeIcon icon={faPlay} className="w-4 h-4" />
+              恢复
+            </button>
+          )}
+          {cfg.status !== 'stopped' && cfg.status !== 'completed' && !cfg.status?.startsWith('error') && (
+            <button
+              onClick={() => stopMutation.mutate(taskId!)}
+              className="px-4 py-2 rounded-xl bg-red-600/60 border border-red-400/40 text-white hover:bg-red-600/80 flex items-center gap-2"
+            >
+              <FontAwesomeIcon icon={faStop} className="w-4 h-4" />
+              停止
+            </button>
+          )}
+          <button
+            onClick={() => refetch()}
+            className="px-4 py-2 rounded-xl bg-slate-700/60 border border-slate-600/50 text-white hover:bg-slate-700/80"
+          >
+            刷新
+          </button>
+        </div>
       </div>
 
       <div className="bg-gradient-to-br from-slate-800/40 via-slate-800/30 to-slate-900/40 backdrop-blur-xl rounded-3xl p-8 border border-slate-700/30">
@@ -87,9 +191,15 @@ export default function FetchTaskDetail() {
         <ResponsiveContainer width="100%" height={480}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
-            <XAxis dataKey="index" stroke="#94a3b8" />
+            <XAxis 
+              dataKey="date" 
+              stroke="#94a3b8"
+              angle={-45}
+              textAnchor="end"
+              height={80}
+            />
             <YAxis stroke="#94a3b8" domain={yDomain as any} />
-            <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155' }} />
+            <Tooltip content={<CustomTooltip />} />
             <Line type="monotone" dataKey="price" stroke="#22c55e" dot={false} name="价格" />
           </LineChart>
         </ResponsiveContainer>

@@ -174,13 +174,45 @@ async def list_strategies():
 @app.get("/api/data/list")
 async def list_data_files():
     """
-    获取所有模拟生成数据列表
+    获取所有数据列表（包括生成的数据和爬取的实盘数据）
     
     Returns:
-        数据文件信息列表
+        数据文件信息列表，每个文件包含 type 字段标识数据类型
     """
     try:
-        files = data_generator.list_all_data_files()
+        files = []
+        # 生成的数据
+        generated_files = data_generator.list_all_data_files()
+        for file_info in generated_files:
+            file_info["type"] = "generated"
+            files.append(file_info)
+        
+        # 爬取的实盘数据
+        if os.path.exists(FETCH_DIR):
+            for filename in os.listdir(FETCH_DIR):
+                if filename.endswith('.txt'):
+                    task_id = filename[:-4]
+                    fetch_path = os.path.join(FETCH_DIR, filename)
+                    try:
+                        with open(fetch_path, "r", encoding="utf-8") as f:
+                            first_line = f.readline().strip()
+                            if first_line:
+                                config = json.loads(first_line)
+                                # 统计数据点数量
+                                lines = f.readlines()
+                                data_count = len([l for l in lines if l.strip()])
+                                files.append({
+                                    "file_id": task_id,
+                                    "type": "fetched",
+                                    "symbol": config.get("symbol", ""),
+                                    "mode": config.get("mode", ""),
+                                    "start_time": config.get("start_time", ""),
+                                    "length": data_count,
+                                    "generated_at": config.get("start_time", ""),
+                                })
+                    except Exception:
+                        continue
+        
         return {"files": files, "count": len(files)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=_format_error(e))
@@ -189,7 +221,7 @@ async def list_data_files():
 @app.get("/api/data/{file_id}")
 async def get_data_file(file_id: str):
     """
-    获取某个生成的模拟数据
+    获取某个数据文件（生成的数据或爬取的实盘数据）
     
     Args:
         file_id: 数据文件ID
@@ -198,15 +230,104 @@ async def get_data_file(file_id: str):
         数据文件信息（元数据和价格数据）
     """
     try:
+        # 使用统一的 load_data 方法加载数据
         metadata, prices = data_generator.load_data(file_id)
-        return {
-            "file_id": file_id,
-            "metadata": metadata,
-            "prices": prices,
-            "data_length": len(prices)
-        }
+        
+        # 根据 metadata 判断数据类型
+        data_type = "fetched" if "symbol" in metadata else "generated"
+        
+        # 如果是爬取数据，需要解析完整的数据点（包含时间戳和交易时段）
+        if data_type == "fetched":
+            # 确定文件路径
+            gen_path = os.path.join("stock_data", "generate", f"{file_id}.txt")
+            fetch_path = os.path.join(FETCH_DIR, f"{file_id}.txt")
+            file_path = fetch_path if os.path.exists(fetch_path) else gen_path
+            
+            points = []
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(",", 2)
+                if len(parts) < 3:
+                    continue
+                timestamp_str = parts[0].strip()
+                quote_session = parts[1].strip()
+                price_str = parts[2].strip()
+                try:
+                    price = float(price_str) if price_str else None
+                except ValueError:
+                    price = None
+                points.append({
+                    "timestamp": timestamp_str,
+                    "quote_session": quote_session,
+                    "price": price,
+                })
+            
+            return {
+                "file_id": file_id,
+                "type": "fetched",
+                "metadata": metadata,
+                "prices": prices,
+                "points": points,
+                "data_length": len(points)
+            }
+        else:
+            return {
+                "file_id": file_id,
+                "type": "generated",
+                "metadata": metadata,
+                "prices": prices,
+                "data_length": len(prices)
+            }
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Data file not found: {file_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_format_error(e))
+
+
+@app.delete("/api/data/{file_id}")
+async def delete_data_file(file_id: str):
+    """
+    删除数据文件（生成的数据或爬取的实盘数据）
+    
+    Args:
+        file_id: 数据文件ID
+        
+    Returns:
+        删除成功消息
+    """
+    try:
+        # 尝试加载数据以确定文件类型和路径
+        try:
+            metadata, _ = data_generator.load_data(file_id)
+            data_type = "fetched" if "symbol" in metadata else "generated"
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Data file not found: {file_id}")
+        
+        # 确定文件路径
+        gen_path = os.path.join("stock_data", "generate", f"{file_id}.txt")
+        fetch_path = os.path.join(FETCH_DIR, f"{file_id}.txt")
+        
+        # 删除文件（可能在任一目录）
+        deleted = False
+        if os.path.exists(fetch_path):
+            os.remove(fetch_path)
+            deleted = True
+        if os.path.exists(gen_path):
+            os.remove(gen_path)
+            deleted = True
+        
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Data file not found: {file_id}")
+        
+        return {"message": f"Data file {file_id} deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=_format_error(e))
 
@@ -864,6 +985,8 @@ class FetchTaskInfo(BaseModel):
 # 内存中的任务管理
 _fetch_tasks: Dict[str, Dict] = {}
 _fetch_task_handles: Dict[str, asyncio.Task] = {}
+# 暂停标志
+_fetch_task_paused: Dict[str, bool] = {}
 
 
 def _interval_to_seconds(interval: FetchInterval) -> float:
@@ -898,16 +1021,63 @@ def _write_fetch_header(task_id: str, info: FetchTaskInfo) -> None:
 
 def _append_fetch_point(task_id: str, point: Dict) -> None:
     path = _fetch_file_path(task_id)
+    # 格式：时间,交易时段,价格（逗号分隔）
+    # 时间只精确到秒，去掉毫秒
+    timestamp_str = point.get("timestamp", "")
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        # 格式化为 YYYY-MM-DD HH:MM:SS，去掉毫秒
+        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        time_str = timestamp_str[:19] if len(timestamp_str) >= 19 else timestamp_str
+    
+    quote_session = point.get("quote_session", "")
+    price = point.get("price", "")
+    # CSV格式：时间,交易时段,价格（逗号分隔）
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(point, ensure_ascii=False) + "\n")
+        f.write(f"{time_str},{quote_session},{price}\n")
+
+
+def _is_us_stock(symbol: str) -> bool:
+    """判断是否为美股"""
+    return symbol.upper().endswith('.US')
+
+
+def _is_hk_stock(symbol: str) -> bool:
+    """判断是否为港股"""
+    return symbol.upper().endswith('.HK')
+
+
+def _is_dst(now_et: datetime) -> bool:
+    """
+    判断当前是否为夏令时（Daylight Saving Time）
+    美国夏令时：3月第二个周日 02:00 - 11月第一个周日 02:00
+    """
+    year = now_et.year
+    # 3月第二个周日
+    march = datetime(year, 3, 1, tzinfo=now_et.tzinfo)
+    march_first_sunday = march + timedelta(days=(6 - march.weekday()) % 7)
+    march_second_sunday = march_first_sunday + timedelta(days=7)
+    dst_start = march_second_sunday.replace(hour=2, minute=0, second=0, microsecond=0)
+    
+    # 11月第一个周日
+    november = datetime(year, 11, 1, tzinfo=now_et.tzinfo)
+    november_first_sunday = november + timedelta(days=(6 - november.weekday()) % 7)
+    dst_end = november_first_sunday.replace(hour=2, minute=0, second=0, microsecond=0)
+    
+    return dst_start <= now_et < dst_end
 
 
 def _get_us_session_name_cn(now_et: datetime) -> str:
+    """
+    获取美股交易时段（中文）
+    考虑冬令时和夏令时，但交易时段在ET时区下是固定的
+    """
     # Weekend
     if now_et.weekday() >= 5:
         return "休市"
     t = now_et.time()
-    # Define ranges in ET
+    # Define ranges in ET (交易时段在ET时区下是固定的)
     pre_start, pre_end = time(4, 0), time(9, 30)
     regular_start, regular_end = time(9, 30), time(16, 0)
     post_start, post_end = time(16, 0), time(20, 0)
@@ -920,6 +1090,60 @@ def _get_us_session_name_cn(now_et: datetime) -> str:
         return "盘后"
     # Overnight or closed outside ranges on weekdays
     return "夜盘"
+
+
+def _get_hk_session_name_cn(now_hk: datetime) -> str:
+    """
+    获取港股交易时段（中文）
+    港股交易时段（HK时间，UTC+8）：
+    - 早盘：09:30 - 12:00
+    - 午休：12:00 - 13:00
+    - 下午盘：13:00 - 16:00
+    - 夜盘（延时交易）：17:15 - 23:45（当日）
+    """
+    # Weekend
+    if now_hk.weekday() >= 5:
+        return "休市"
+    t = now_hk.time()
+    # 早盘
+    if time(9, 30) <= t < time(12, 0):
+        return "盘中"
+    # 午休
+    if time(12, 0) <= t < time(13, 0):
+        return "休市"
+    # 下午盘
+    if time(13, 0) <= t < time(16, 0):
+        return "盘中"
+    # 夜盘（延时交易）
+    if time(17, 15) <= t < time(23, 45):
+        return "夜盘"
+    # 其他时间为休市（包括 03:00 - 09:30 和 23:45 - 24:00）
+    return "休市"
+
+
+def _get_session_name_cn(symbol: str, now_utc: datetime) -> str:
+    """
+    根据股票代码和UTC时间获取交易时段（中文）
+    
+    Args:
+        symbol: 股票代码
+        now_utc: UTC时间
+    
+    Returns:
+        交易时段名称（盘前/盘中/盘后/夜盘/休市）
+    """
+    if _is_us_stock(symbol):
+        # 美股：转换为ET时区
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        return _get_us_session_name_cn(now_et)
+    elif _is_hk_stock(symbol):
+        # 港股：转换为HK时区
+        now_hk = now_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
+        return _get_hk_session_name_cn(now_hk)
+    else:
+        # 未知类型，默认使用美股逻辑
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        return _get_us_session_name_cn(now_et)
 
 
 async def _run_fetch_task(task_id: str) -> None:
@@ -935,9 +1159,14 @@ async def _run_fetch_task(task_id: str) -> None:
 
     try:
         while True:
-            now = datetime.now()
-            now_et = now.astimezone(ZoneInfo("America/New_York"))
-            current_session = _get_us_session_name_cn(now_et)
+            # 检查是否暂停
+            if _fetch_task_paused.get(task_id, False):
+                meta["status"] = "paused"
+                await asyncio.sleep(1)
+                continue
+            
+            now = datetime.now(ZoneInfo("UTC"))
+            current_session = _get_session_name_cn(symbol, now)
             meta["current_session"] = current_session
             if stop_at and now >= stop_at:
                 meta["status"] = "completed"
@@ -979,7 +1208,14 @@ async def create_fetch_task(req: FetchTaskCreateRequest):
         duration_delta = _duration_to_timedelta(req.duration)
         # 生成任务ID
         task_id = str(uuid.uuid4())[:8]
-        started_at = datetime.now()
+        started_at = datetime.now(ZoneInfo("UTC"))
+        # 根据股票代码确定时区
+        if _is_us_stock(req.symbol):
+            timezone = "America/New_York"
+        elif _is_hk_stock(req.symbol):
+            timezone = "Asia/Hong_Kong"
+        else:
+            timezone = "America/New_York"  # 默认使用美股时区
         info = FetchTaskInfo(
             task_id=task_id,
             symbol=req.symbol,
@@ -990,7 +1226,7 @@ async def create_fetch_task(req: FetchTaskCreateRequest):
             start_time=started_at.isoformat(),
             status="running",
         file_path=_fetch_file_path(task_id),
-        timezone="America/New_York",
+        timezone=timezone,
         current_session=None,
         )
         _fetch_tasks[task_id] = {
@@ -1004,6 +1240,7 @@ async def create_fetch_task(req: FetchTaskCreateRequest):
             "status": "running",
             "file_path": info.file_path,
         }
+        _fetch_task_paused[task_id] = False
         _write_fetch_header(task_id, info)
         # 启动后台任务
         task = asyncio.create_task(_run_fetch_task(task_id))
@@ -1041,16 +1278,62 @@ async def get_fetch_task(task_id: str):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="任务文件不存在")
     try:
-        # 读取文件，第一行是配置，后面是逐行数据点
+        # 读取文件，第一行是配置，后面是CSV格式数据点（逗号分隔：时间,交易时段,价格）
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
         config = json.loads(lines[0]) if lines else {}
+        # 更新配置中的状态为内存中的最新状态
+        if meta:
+            config["status"] = meta["status"]
         # 只返回最近100条数据
         points_raw = lines[1:][-100:]
-        points = [json.loads(x) for x in points_raw]
+        points = []
+        for line in points_raw:
+            line = line.strip()
+            if not line:
+                continue
+            # 格式：YYYY-MM-DD HH:MM:SS,交易时段,价格（逗号分隔）
+            # 时间包含空格，所以需要按第一个逗号分割
+            parts = line.split(",", 2)  # 最多分割2次，得到3个部分
+            if len(parts) < 3:
+                continue
+            timestamp_str = parts[0].strip()
+            quote_session = parts[1].strip()
+            price_str = parts[2].strip()
+            try:
+                price = float(price_str) if price_str else None
+            except ValueError:
+                price = None
+            points.append({
+                "timestamp": timestamp_str,
+                "quote_session": quote_session,
+                "price": price,
+            })
         return {"config": config, "latest_points": points, "count": len(points), "current_session": _fetch_tasks.get(task_id, {}).get("current_session")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=_format_error(e))
+
+
+@app.post("/api/fetch/{task_id}/pause")
+async def pause_fetch_task(task_id: str):
+    meta = _fetch_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if meta["status"] in ["stopped", "completed"]:
+        raise HTTPException(status_code=400, detail="任务已停止或已完成，无法暂停")
+    _fetch_task_paused[task_id] = True
+    return {"message": "任务已暂停"}
+
+
+@app.post("/api/fetch/{task_id}/resume")
+async def resume_fetch_task(task_id: str):
+    meta = _fetch_tasks.get(task_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if meta["status"] in ["stopped", "completed"]:
+        raise HTTPException(status_code=400, detail="任务已停止或已完成，无法恢复")
+    _fetch_task_paused[task_id] = False
+    return {"message": "任务已恢复"}
 
 
 @app.post("/api/fetch/{task_id}/stop")
@@ -1061,9 +1344,11 @@ async def stop_fetch_task(task_id: str):
     handle = _fetch_task_handles.get(task_id)
     if not handle:
         meta["status"] = "stopped"
+        _fetch_task_paused.pop(task_id, None)
         return {"message": "任务已停止"}
     try:
         handle.cancel()
+        _fetch_task_paused.pop(task_id, None)
         return {"message": "已发送停止指令"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=_format_error(e))

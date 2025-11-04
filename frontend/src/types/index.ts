@@ -2,20 +2,26 @@
 
 export interface DataFile {
   file_id: string;
+  type: 'generated' | 'fetched';
   length: number;
-  base_mean: number;
-  trend: 'up' | 'stable' | 'down';
-  start_price: number;
-  end_price: number;
-  volatility_prob: number;
-  volatility_scale: number;
+  base_mean?: number;
+  trend?: 'up' | 'stable' | 'down';
+  start_price?: number;
+  end_price?: number;
+  volatility_prob?: number;
+  volatility_scale?: number;
   generated_at: string;
   seed?: number | null;
+  // 爬取数据特有字段
+  symbol?: string;
+  mode?: string;
+  start_time?: string;
 }
 
 export interface DataFileDetail extends DataFile {
   prices: number[];
   data_length: number;
+  points?: Array<{ timestamp: string; quote_session: string; price: number | null }>;
 }
 
 export interface DataGenerateRequest {

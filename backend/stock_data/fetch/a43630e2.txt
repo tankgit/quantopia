@@ -1,1 +1,0 @@
-{"task_id": "a43630e2", "symbol": "AAPL.US", "mode": "paper", "interval": {"value": 5, "unit": "seconds"}, "sessions": ["盘前"], "duration": {"mode": "permanent", "days": 0, "hours": 0, "minutes": 0, "seconds": 0}, "start_time": "2025-11-03T19:46:59.835634", "status": "running", "file_path": "stock_data/fetch/a43630e2.txt"}

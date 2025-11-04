@@ -38,6 +38,11 @@ export const dataApi = {
     const response = await api.post('/api/data/generate', request);
     return response.data;
   },
+
+  delete: async (fileId: string): Promise<{ message: string }> => {
+    const response = await api.delete(`/api/data/${fileId}`);
+    return response.data;
+  },
 };
 
 // 回测相关API
@@ -100,6 +105,14 @@ export const fetchApi = {
   },
   get: async (taskId: string): Promise<FetchTaskDetailResponse> => {
     const response = await api.get(`/api/fetch/${taskId}`);
+    return response.data;
+  },
+  pause: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.post(`/api/fetch/${taskId}/pause`);
+    return response.data;
+  },
+  resume: async (taskId: string): Promise<{ message: string }> => {
+    const response = await api.post(`/api/fetch/${taskId}/resume`);
     return response.data;
   },
   stop: async (taskId: string): Promise<{ message: string }> => {

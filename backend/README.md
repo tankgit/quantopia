@@ -1,10 +1,5 @@
 # Quantopia Backend
 
-量化交易实验系统后端
-
-## 作者
-Tank
-
 ## 项目结构
 
 ```
