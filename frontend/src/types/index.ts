@@ -46,7 +46,9 @@ export interface BacktestCreateRequest {
   strategy_name: string;
   strategy_params: Record<string, any>;
   initial_cash: number;
-  commission_rate: number;
+  commission?: number;
+  lot_size?: number;
+  max_pos_ratio?: number;
 }
 
 export interface BacktestResult {
@@ -213,6 +215,9 @@ export interface TradeTaskCreateRequest {
   price_interval: TradeInterval;
   signal_interval: TradeInterval;
   max_cache_size: number;
+  lot_size?: number;
+  max_pos_ratio?: number;
+  commission?: number;
 }
 
 export interface TradeTaskSummary {
@@ -235,8 +240,7 @@ export interface TradeMetrics {
   total_return_rate: number;
   profit_loss_ratio: number;
   sharpe_ratio: number;
-  initial_cash: number;
-  current_cash: number;
+  available_cash: number;
   current_position: number;
   current_asset_value: number;
 }

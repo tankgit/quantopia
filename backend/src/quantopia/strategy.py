@@ -179,13 +179,18 @@ class MAStrategy(BaseStrategy):
                 signal = Signal.SELL
                 reason = "death_cross"
         
+        # 计算信号强度（MA策略简单处理：有信号时强度为1.0，无信号时为0.0）
+        signal_strength = 1.0 if signal != Signal.HOLD else 0.0
+        
         info = {
             "reason": reason,
             "short_ma": round(short_ma, 3),
             "long_ma": round(long_ma, 3),
             "current_price": round(prices[current_index], 3),
             "prev_short_ma": round(prev_short_ma, 3) if prev_short_ma is not None else None,
-            "prev_long_ma": round(prev_long_ma, 3) if prev_long_ma is not None else None
+            "prev_long_ma": round(prev_long_ma, 3) if prev_long_ma is not None else None,
+            "position_ratio": 1.0,  # MA策略采用全仓交易（保留用于向后兼容）
+            "signal_strength": signal_strength  # 信号强度（0-1之间）
         }
         
         return signal, info

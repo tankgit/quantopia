@@ -508,35 +508,29 @@ export default function TradeTaskDetail() {
               <div className="text-2xl font-bold text-amber-400">{data.metrics.sharpe_ratio.toFixed(4)}</div>
             </div>
             
-            {/* 初始资金 */}
+                        {/* 可用现金 */}
             <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
-              <div className="text-slate-400 text-xs mb-1">初始资金</div>
-              <div className="text-xl font-bold text-white">{data.metrics.initial_cash.toFixed(2)}</div>
-            </div>
-            
-            {/* 当前现金 */}
-            <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
-              <div className="text-slate-400 text-xs mb-1">当前现金</div>
-              <div className="text-xl font-bold text-white">{data.metrics.current_cash.toFixed(2)}</div>
+              <div className="text-slate-400 text-xs mb-1">可用现金</div>
+              <div className="text-xl font-bold text-white">{(data.metrics?.available_cash ?? 0).toFixed(2)}</div>
             </div>
             
             {/* 当前持仓 */}
             <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/50">
               <div className="text-slate-400 text-xs mb-1">当前持仓</div>
-              <div className="text-xl font-bold text-white">{data.metrics.current_position.toFixed(4)}</div>
+              <div className="text-xl font-bold text-white">{(data.metrics?.current_position ?? 0).toFixed(4)}</div>
             </div>
             
             {/* 当前资产价值 */}
             <div className={`rounded-xl p-4 border ${
-              data.metrics.current_asset_value >= data.metrics.initial_cash
+              (data.metrics?.current_asset_value ?? 0) >= (data.metrics?.available_cash ?? 0)
                 ? 'bg-green-500/10 border-green-500/30' 
                 : 'bg-red-500/10 border-red-500/30'
             }`}>
               <div className="text-slate-400 text-xs mb-1">资产价值</div>
               <div className={`text-xl font-bold ${
-                data.metrics.current_asset_value >= data.metrics.initial_cash ? 'text-green-400' : 'text-red-400'
+                (data.metrics?.current_asset_value ?? 0) >= (data.metrics?.available_cash ?? 0) ? 'text-green-400' : 'text-red-400'
               }`}>
-                {data.metrics.current_asset_value.toFixed(2)}
+                {(data.metrics?.current_asset_value ?? 0).toFixed(2)}
               </div>
             </div>
           </div>
@@ -567,7 +561,11 @@ export default function TradeTaskDetail() {
               textAnchor="end"
               height={80}
             />
-            <YAxis stroke="#94a3b8" domain={yDomain as any} />
+            <YAxis 
+              stroke="#94a3b8" 
+              domain={yDomain as any}
+              tickFormatter={(value) => Number(value).toFixed(3)}
+            />
             <Tooltip content={<CustomTooltip />} />
             <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} name="价格" />
             {/* 买入点 */}
@@ -677,7 +675,7 @@ export default function TradeTaskDetail() {
           <div className="bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 rounded-2xl p-8 border border-slate-700 shadow-2xl max-w-md w-full mx-4">
             <h3 className="text-xl font-bold text-white mb-4">确认删除</h3>
             <p className="text-slate-300 mb-6">
-              确定要删除交易任务 <span className="font-mono text-white">{data.task_id}</span> 吗？此操作将删除任务及其所有日志，不可恢复。
+              确定要删除交易任务 <span className="font-mono text-white">{taskId}</span> 吗？此操作将删除任务及其所有日志，不可恢复。
             </p>
             <div className="flex gap-3 justify-end">
               <button

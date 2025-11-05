@@ -140,7 +140,11 @@ async def load_tasks_from_logs():
                 
                 # 读取metrics（如果存在）
                 metrics = config.get("metrics", {})
-                initial_cash = metrics.get("initial_cash", 100000.0) if metrics else 100000.0
+                initial_cash = config.get("initial_cash") or metrics.get("initial_cash", 100000.0) if metrics else 100000.0
+                available_cash = config.get("available_cash", initial_cash)
+                lot_size = config.get("lot_size", 1.0)
+                max_pos_ratio = config.get("max_pos_ratio", 1.0)
+                max_buy_count = config.get("max_buy_count", 0.0)
                 
                 # 加载到_trade_tasks
                 _trade_tasks[task_id] = {
@@ -163,6 +167,11 @@ async def load_tasks_from_logs():
                     "current_session": config.get("current_session"),
                     "timezone": config.get("timezone", "America/New_York"),
                     "initial_cash": initial_cash,
+                    "available_cash": available_cash,
+                    "lot_size": lot_size,
+                    "max_pos_ratio": max_pos_ratio,
+                    "commission": config.get("commission", 5.0),
+                    "max_buy_count": max_buy_count,
                 }
                 
                 # 如果状态是paused，设置暂停标志
@@ -275,7 +284,9 @@ class BacktestCreateRequest(BaseModel):
     strategy_name: str = "MA_Strategy"
     strategy_params: dict = {}  # MA策略参数：short_window, long_window
     initial_cash: float = 100000.0
-    commission_rate: float = 0.001
+    commission: float = Field(5.0, ge=0, description="每笔交易手续费（绝对数值，单位：元）")
+    lot_size: float = Field(1.0, gt=0, description="最小交易单位（股数）")
+    max_pos_ratio: float = Field(1.0, gt=0, le=1.0, description="最大持仓比率（0-1之间）")
 
 
 class BacktestResult(BaseModel):
@@ -592,7 +603,9 @@ async def create_backtest(request: BacktestCreateRequest):
             strategy=strategy,
             data_file_id=request.data_file_id,
             initial_cash=request.initial_cash,
-            commission_rate=request.commission_rate
+            commission=request.commission,
+            lot_size=request.lot_size,
+            max_pos_ratio=request.max_pos_ratio
         )
         
         return result
@@ -878,7 +891,7 @@ async def analyze_backtest_task(run_id: str, request: AIAnalysisRequest):
             "strategy_name": config.get("strategy_name", ""),
             "strategy_params": config.get("strategy_params", {}),
             "initial_cash": config.get("initial_cash", 0),
-            "commission_rate": config.get("commission_rate", 0)
+            "commission": config.get("commission", 5.0)
         }
         
         stats_summary = {
@@ -1881,6 +1894,9 @@ class TradeTaskCreateRequest(BaseModel):
     price_interval: TradeInterval  # 采样股票价格的时间间隔
     signal_interval: TradeInterval  # 产生信号的时间间隔
     max_cache_size: int = Field(1000, description="最大缓存的股票数据数目")
+    lot_size: float = Field(1.0, gt=0, description="最小交易单位（股数）")
+    max_pos_ratio: float = Field(1.0, gt=0, le=1.0, description="最大持仓比率（0-1之间）")
+    commission: float = Field(5.0, ge=0, description="每笔交易手续费（绝对数值，单位：元）")
 
 class TradeTaskInfo(BaseModel):
     task_id: str
@@ -1907,12 +1923,30 @@ _trade_task_paused: Dict[str, bool] = {}
 def _trade_file_path(task_id: str) -> str:
     return os.path.join(TRADE_DIR, f"{task_id}.txt")
 
-def _write_trade_header(task_id: str, info: TradeTaskInfo) -> None:
+def _write_trade_header(task_id: str, info: TradeTaskInfo, task_meta: Optional[Dict] = None) -> None:
     """写入交易任务配置头部"""
     os.makedirs(TRADE_DIR, exist_ok=True)
     path = _trade_file_path(task_id)
     config_dict = info.model_dump()
+    
+    # 从任务元数据中获取额外参数（如果提供）
+    if task_meta:
+        config_dict["lot_size"] = task_meta.get("lot_size", 1.0)
+        config_dict["max_pos_ratio"] = task_meta.get("max_pos_ratio", 1.0)
+        config_dict["initial_cash"] = task_meta.get("initial_cash", 100000.0)
+        config_dict["available_cash"] = task_meta.get("available_cash", task_meta.get("initial_cash", 100000.0))
+        config_dict["commission"] = task_meta.get("commission", 5.0)
+        config_dict["max_buy_count"] = task_meta.get("max_buy_count", 0.0)
+    else:
+        # 默认值
+        config_dict["lot_size"] = 1.0
+        config_dict["max_pos_ratio"] = 1.0
+        config_dict["initial_cash"] = 100000.0
+        config_dict["available_cash"] = 100000.0
+        config_dict["max_buy_count"] = 0.0
+    
     # 初始化metrics字段
+    available_cash = config_dict.get("available_cash", 100000.0)
     config_dict["metrics"] = {
         "total_trades": 0,
         "buy_count": 0,
@@ -1922,21 +1956,61 @@ def _write_trade_header(task_id: str, info: TradeTaskInfo) -> None:
         "total_return_rate": 0.0,
         "profit_loss_ratio": 0.0,
         "sharpe_ratio": 0.0,
-        "initial_cash": 100000.0,  # 默认初始资金
-        "current_cash": 100000.0,
+        "available_cash": available_cash,
         "current_position": 0.0,
-        "current_asset_value": 100000.0,
+        "current_asset_value": available_cash,
     }
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(config_dict, ensure_ascii=False) + "\n")
 
-def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 100000.0) -> Dict:
+async def _update_trade_metrics_from_account(task_id: str):
+    """定时查询账户更新可用现金"""
+    meta = _trade_tasks.get(task_id)
+    if not meta:
+        return
+    
+    try:
+        mode = meta.get("mode", "paper")
+        symbol = meta.get("symbol", "")
+        
+        # 从symbol中提取market（US或HK）
+        market = "US" if symbol.upper().endswith('.US') else "HK" if symbol.upper().endswith('.HK') else "US"
+        
+        # 使用get_assets_by_market查询账户资产信息
+        assets_info = longport_service.get_assets_by_market(market, mode=mode)
+        if assets_info and "available_cash" in assets_info:
+            available_cash = float(assets_info["available_cash"])
+            meta["available_cash"] = available_cash
+            _trade_tasks[task_id]["available_cash"] = available_cash
+            
+            # 更新日志文件中的metrics
+            try:
+                file_path = meta.get("file_path")
+                if file_path and os.path.exists(file_path):
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    if lines:
+                        config = json.loads(lines[0].strip())
+                        if "metrics" not in config:
+                            config["metrics"] = {}
+                        config["metrics"]["available_cash"] = available_cash
+                        # 同时更新config中的available_cash
+                        config["available_cash"] = available_cash
+                        lines[0] = json.dumps(config, ensure_ascii=False) + "\n"
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.writelines(lines)
+            except Exception as e:
+                print(f"Warning: Failed to update metrics in log file: {_format_error(e)}")
+    except Exception as e:
+        print(f"Warning: Failed to update available cash from account: {_format_error(e)}")
+
+def _calculate_trade_metrics(trade_records: List[Dict], available_cash: float = 100000.0) -> Dict:
     """
     计算交易指标
     
     Args:
         trade_records: 交易记录列表
-        initial_cash: 初始资金
+        available_cash: 可用现金（从账户实时查询）
     
     Returns:
         指标字典
@@ -1951,10 +2025,9 @@ def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 10
             "total_return_rate": 0.0,
             "profit_loss_ratio": 0.0,
             "sharpe_ratio": 0.0,
-            "initial_cash": initial_cash,
-            "current_cash": initial_cash,
+            "available_cash": available_cash,
             "current_position": 0.0,
-            "current_asset_value": initial_cash,
+            "current_asset_value": available_cash,
         }
     
     # 统计买卖次数
@@ -1962,8 +2035,8 @@ def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 10
     sell_count = sum(1 for r in trade_records if r.get("trade_type") == "sell")
     total_trades = len(trade_records)
     
-    # 计算持仓和现金（模拟交易）
-    cash = initial_cash
+    # 计算持仓（基于交易记录）
+    cash = available_cash  # 使用从账户查询的可用现金作为基准
     position = 0.0  # 持仓数量
     position_cost = 0.0  # 持仓成本
     completed_trades = []  # 已完成的交易（买入-卖出配对）
@@ -1971,50 +2044,214 @@ def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 10
     # 记录买入订单
     buy_orders = []
     
+    # 从第一条交易记录或配置中获取commission（固定手续费），如果没有则使用默认值
+    commission_amount = 5.0  # 默认固定手续费
+    if trade_records:
+        first_record_commission = trade_records[0].get("commission")
+        if first_record_commission is not None:
+            commission_amount = float(first_record_commission)
+    
     for record in trade_records:
         trade_type = record.get("trade_type")
         price = record.get("price", 0.0)
         
-        if trade_type == "buy" and price > 0:
-            # 假设使用30%的资金买入（可以根据策略调整）
-            buy_amount = cash * 0.3
-            commission = buy_amount * 0.001  # 0.1%手续费
-            actual_amount = buy_amount - commission
-            quantity = actual_amount / price
-            
-            cash -= buy_amount
-            position += quantity
-            position_cost += buy_amount
-            
-            buy_orders.append({
-                "price": price,
-                "quantity": quantity,
-                "amount": buy_amount,
-            })
+        # 从交易记录中获取策略信息（优先使用strategy_info，向后兼容signal_info）
+        strategy_info = record.get("strategy_info") or record.get("signal_info", {})
+        quantity = strategy_info.get("quantity")  # 直接指定的股数
+        position_ratio = strategy_info.get("position_ratio")  # 仓位比例
         
-        elif trade_type == "sell" and price > 0 and len(buy_orders) > 0:
-            # 卖出最近的买入订单
-            buy_order = buy_orders.pop(0)
-            sell_quantity = min(buy_order["quantity"], position)
-            sell_amount = sell_quantity * price
-            commission = sell_amount * 0.001
-            actual_sell_amount = sell_amount - commission
+        if trade_type == "buy" and price > 0:
+            # 使用记录中的commission，如果没有则使用默认值
+            record_commission = record.get("commission")
+            if record_commission is not None:
+                commission = float(record_commission)
+            else:
+                commission = commission_amount
             
-            cash += actual_sell_amount
-            position -= sell_quantity
+            if quantity is not None and quantity > 0:
+                # 使用直接指定的数量买入
+                trade_value = quantity * price
+                total_cost = trade_value + commission
+                
+                # 检查资金是否足够
+                if cash >= total_cost:
+                    cash -= total_cost
+                    position += quantity
+                    position_cost += total_cost
+                    
+                    buy_orders.append({
+                        "price": price,
+                        "quantity": quantity,
+                        "amount": total_cost,
+                        "cost": total_cost
+                    })
+            elif position_ratio is not None:
+                # 使用仓位比例买入
+                position_ratio = max(0.0, min(1.0, position_ratio))  # 限制在0-1之间
+                target_cash = cash * position_ratio
+                # 使用固定手续费
+                available_cash = target_cash - commission
+                quantity = available_cash / price if price > 0 else 0
+                
+                if quantity > 0:
+                    cash -= target_cash
+                    position += quantity
+                    position_cost += target_cash
+                    
+                    buy_orders.append({
+                        "price": price,
+                        "quantity": quantity,
+                        "amount": target_cash,
+                        "cost": target_cash
+                    })
+            else:
+                # 默认使用30%的资金买入（向后兼容，如果没有指定数量信息）
+                buy_amount = cash * 0.3
+                # 使用固定手续费
+                available_cash = buy_amount - commission
+                quantity = available_cash / price if price > 0 else 0
+                
+                if quantity > 0:
+                    cash -= buy_amount
+                    position += quantity
+                    position_cost += buy_amount
+                    
+                    buy_orders.append({
+                        "price": price,
+                        "quantity": quantity,
+                        "amount": buy_amount,
+                        "cost": buy_amount
+                    })
+        
+        elif trade_type == "sell" and price > 0:
+            # 使用记录中的commission，如果没有则使用默认值
+            record_commission = record.get("commission")
+            if record_commission is not None:
+                commission = float(record_commission)
+            else:
+                commission = commission_amount
             
-            # 计算盈亏
-            buy_cost = buy_order["amount"]
-            profit = actual_sell_amount - buy_cost
-            completed_trades.append(profit)
-            
-            position_cost -= buy_cost * (sell_quantity / buy_order["quantity"])
+            if quantity is not None and quantity != 0:
+                # 使用直接指定的数量卖出
+                sell_quantity = abs(quantity)
+                sell_quantity = min(sell_quantity, position)  # 不能超过持仓
+                
+                if sell_quantity > 0:
+                    # 使用FIFO匹配买入订单
+                    remaining_to_sell = sell_quantity
+                    total_sell_value = 0.0
+                    
+                    while remaining_to_sell > 0.001 and buy_orders:
+                        buy_order = buy_orders[0]
+                        matched_quantity = min(remaining_to_sell, buy_order["quantity"])
+                        sell_value = matched_quantity * price
+                        # 使用固定手续费
+                        actual_sell_value = sell_value - commission
+                        
+                        total_sell_value += actual_sell_value
+                        cash += actual_sell_value
+                        position -= matched_quantity
+                        
+                        # 计算盈亏
+                        buy_cost = buy_order["cost"] * (matched_quantity / buy_order["quantity"])
+                        profit = actual_sell_value - buy_cost
+                        completed_trades.append(profit)
+                        
+                        # 更新买入订单
+                        buy_order["quantity"] -= matched_quantity
+                        buy_order["amount"] -= buy_cost
+                        buy_order["cost"] -= buy_cost
+                        
+                        if buy_order["quantity"] <= 0.001:
+                            buy_orders.pop(0)
+                        
+                        remaining_to_sell -= matched_quantity
+                        
+                        # 更新持仓成本
+                        position_cost -= buy_cost
+            elif position_ratio is not None:
+                # 使用仓位比例卖出
+                position_ratio = max(0.0, min(1.0, position_ratio))  # 限制在0-1之间
+                sell_quantity = position * position_ratio
+                
+                if sell_quantity > 0:
+                    # 使用FIFO匹配买入订单
+                    remaining_to_sell = sell_quantity
+                    
+                    while remaining_to_sell > 0.001 and buy_orders:
+                        buy_order = buy_orders[0]
+                        matched_quantity = min(remaining_to_sell, buy_order["quantity"])
+                        sell_value = matched_quantity * price
+                        # 使用固定手续费
+                        actual_sell_value = sell_value - commission
+                        
+                        cash += actual_sell_value
+                        position -= matched_quantity
+                        
+                        # 计算盈亏
+                        buy_cost = buy_order["cost"] * (matched_quantity / buy_order["quantity"])
+                        profit = actual_sell_value - buy_cost
+                        completed_trades.append(profit)
+                        
+                        # 更新买入订单
+                        buy_order["quantity"] -= matched_quantity
+                        buy_order["amount"] -= buy_cost
+                        buy_order["cost"] -= buy_cost
+                        
+                        if buy_order["quantity"] <= 0.001:
+                            buy_orders.pop(0)
+                        
+                        remaining_to_sell -= matched_quantity
+                        
+                        # 更新持仓成本
+                        position_cost -= buy_cost
+            else:
+                # 默认全仓卖出（如果还有买入订单）
+                # 使用记录中的commission，如果没有则使用默认值
+                record_commission = record.get("commission")
+                if record_commission is not None:
+                    commission = float(record_commission)
+                else:
+                    commission = commission_amount
+                
+                if buy_orders:
+                    sell_quantity = position
+                    remaining_to_sell = sell_quantity
+                    
+                    while remaining_to_sell > 0.001 and buy_orders:
+                        buy_order = buy_orders[0]
+                        matched_quantity = min(remaining_to_sell, buy_order["quantity"])
+                        sell_value = matched_quantity * price
+                        # 使用固定手续费
+                        actual_sell_value = sell_value - commission
+                        
+                        cash += actual_sell_value
+                        position -= matched_quantity
+                        
+                        # 计算盈亏
+                        buy_cost = buy_order["cost"] * (matched_quantity / buy_order["quantity"])
+                        profit = actual_sell_value - buy_cost
+                        completed_trades.append(profit)
+                        
+                        # 更新买入订单
+                        buy_order["quantity"] -= matched_quantity
+                        buy_order["amount"] -= buy_cost
+                        buy_order["cost"] -= buy_cost
+                        
+                        if buy_order["quantity"] <= 0.001:
+                            buy_orders.pop(0)
+                        
+                        remaining_to_sell -= matched_quantity
+                        
+                        # 更新持仓成本
+                        position_cost -= buy_cost
     
     # 计算当前资产价值
     current_price = trade_records[-1].get("price", 0.0) if trade_records else 0.0
     current_asset_value = cash + (position * current_price if current_price > 0 else 0)
-    total_profit = current_asset_value - initial_cash
-    total_return_rate = (total_profit / initial_cash * 100) if initial_cash > 0 else 0.0
+    # 总收益率基于可用现金计算（不再使用初始资金）
+    total_profit = current_asset_value - available_cash
+    total_return_rate = (total_profit / available_cash * 100) if available_cash > 0 else 0.0
     
     # 计算胜率
     winning_trades = sum(1 for p in completed_trades if p > 0)
@@ -2029,13 +2266,16 @@ def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 10
     
     # 计算夏普比率（简化版，使用日收益率）
     if len(completed_trades) > 1:
-        returns = [p / initial_cash for p in completed_trades]
-        avg_return = sum(returns) / len(returns)
-        variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
-        std_dev = variance ** 0.5
-        sharpe_ratio = (avg_return / std_dev) if std_dev > 0 else 0.0
-        # 年化（假设252个交易日）
-        sharpe_ratio = sharpe_ratio * (252 ** 0.5) if len(returns) > 1 else 0.0
+        returns = [p / available_cash for p in completed_trades] if available_cash > 0 else []
+        if returns:
+            avg_return = sum(returns) / len(returns)
+            variance = sum((r - avg_return) ** 2 for r in returns) / len(returns)
+            std_dev = variance ** 0.5
+            sharpe_ratio = (avg_return / std_dev) if std_dev > 0 else 0.0
+            # 年化（假设252个交易日）
+            sharpe_ratio = sharpe_ratio * (252 ** 0.5) if len(returns) > 1 else 0.0
+        else:
+            sharpe_ratio = 0.0
     else:
         sharpe_ratio = 0.0
     
@@ -2048,20 +2288,19 @@ def _calculate_trade_metrics(trade_records: List[Dict], initial_cash: float = 10
         "total_return_rate": round(total_return_rate, 2),
         "profit_loss_ratio": round(profit_loss_ratio, 2),
         "sharpe_ratio": round(sharpe_ratio, 4),
-        "initial_cash": initial_cash,
-        "current_cash": round(cash, 2),
+        "available_cash": round(cash, 2),
         "current_position": round(position, 4),
         "current_asset_value": round(current_asset_value, 2),
     }
 
-def _update_trade_metrics(task_id: str, trade_records: List[Dict], initial_cash: float = 100000.0) -> None:
+def _update_trade_metrics(task_id: str, trade_records: List[Dict], available_cash: float = None) -> None:
     """
     更新日志文件第一行的metrics字段
     
     Args:
         task_id: 任务ID
         trade_records: 交易记录列表
-        initial_cash: 初始资金
+        available_cash: 可用现金（如果为None，则从meta或config中获取）
     """
     try:
         path = _trade_file_path(task_id)
@@ -2078,8 +2317,18 @@ def _update_trade_metrics(task_id: str, trade_records: List[Dict], initial_cash:
         # 解析第一行配置
         config = json.loads(lines[0].strip())
         
+        # 如果没有传入available_cash，从config或meta中获取
+        if available_cash is None:
+            available_cash = config.get("available_cash")
+            if available_cash is None:
+                meta = _trade_tasks.get(task_id)
+                if meta:
+                    available_cash = meta.get("available_cash", 100000.0)
+                else:
+                    available_cash = 100000.0
+        
         # 计算指标
-        metrics = _calculate_trade_metrics(trade_records, initial_cash)
+        metrics = _calculate_trade_metrics(trade_records, available_cash)
         
         # 更新配置中的metrics
         config["metrics"] = metrics
@@ -2191,6 +2440,9 @@ async def _run_trade_task(task_id: str) -> None:
     trade_history: List[dict] = []  # 临时历史记录（用于策略计算）
     last_signal_time: Optional[datetime] = None
     
+    # 定时更新可用现金（每60秒更新一次）
+    last_cash_update_time = datetime.now(ZoneInfo("UTC"))
+    
     try:
         while True:
             # 检查是否暂停
@@ -2202,6 +2454,14 @@ async def _run_trade_task(task_id: str) -> None:
             now = datetime.now(ZoneInfo("UTC"))
             current_session = _get_session_name_cn(symbol, now)
             meta["current_session"] = current_session
+            
+            # 定时更新可用现金（每60秒）
+            if (now - last_cash_update_time).total_seconds() >= 60:
+                try:
+                    await _update_trade_metrics_from_account(task_id)
+                except Exception as e:
+                    print(f"Warning: Failed to update cash in scheduled task: {_format_error(e)}")
+                last_cash_update_time = now
             
             # 检查是否超时
             if stop_at and now >= stop_at:
@@ -2294,23 +2554,152 @@ async def _run_trade_task(task_id: str) -> None:
                         "cache_size": len(price_cache)
                     })
                     
-                    # 如果是买卖信号，执行交易（这里可以扩展为实际下单）
+                    # 每次生成信号时，都将策略信息添加到 trade_history（用于下一次策略计算）
+                    # 这样策略可以获取上一次的策略信息（如 prev_short_ma, prev_long_ma）
+                    history_entry = {
+                        "index": current_index,
+                        "price": price_cache[current_index],
+                        "signal": signal.value,
+                        "strategy_info": strategy_info,  # 使用 strategy_info 字段名，与回测代码保持一致
+                        "timestamp": now_local.isoformat(),
+                        "session": current_session
+                    }
+                    trade_history.append(history_entry)  # 添加到历史记录，供策略下次使用
+                    
+                    # 如果是买卖信号，计算实际交易数量并执行交易
                     if signal.value in ["buy", "sell"]:
-                        trade_entry = {
-                            "timestamp": now_local.isoformat(),
-                            "type": "trade",
-                            "trade_type": signal.value,
-                            "price": price_cache[current_index],
-                            "signal_info": strategy_info,
-                            "session": current_session
-                        }
-                        trade_history.append(trade_entry)  # 用于策略计算
-                        trade_records.append(trade_entry)  # 添加到专门的交易记录列表
-                        _append_trade_log(task_id, trade_entry)  # 写入日志文件（用于持久化）
+                        current_price = price_cache[current_index]
+                        lot_size = meta.get("lot_size", 1.0)
+                        max_pos_ratio = meta.get("max_pos_ratio", 1.0)
                         
-                        # 更新实时指标
-                        initial_cash = meta.get("initial_cash", 100000.0)
-                        _update_trade_metrics(task_id, trade_records, initial_cash)
+                        # 实时查询当前账户的可用资金（交易前查询）
+                        try:
+                            mode = meta.get("mode", "paper")
+                            symbol = meta.get("symbol", "")
+                            
+                            # 从symbol中提取market（US或HK）
+                            market = "US" if symbol.upper().endswith('.US') else "HK" if symbol.upper().endswith('.HK') else "US"
+                            
+                            # 使用get_assets_by_market查询账户资产信息
+                            assets_info = longport_service.get_assets_by_market(market, mode=mode)
+                            if assets_info and "available_cash" in assets_info:
+                                available_cash = float(assets_info["available_cash"])
+                                # 更新meta中的available_cash
+                                meta["available_cash"] = available_cash
+                                # 更新任务字典中的available_cash
+                                _trade_tasks[task_id]["available_cash"] = available_cash
+                            else:
+                                # 如果查询失败，使用缓存的可用资金
+                                available_cash = meta.get("available_cash", meta.get("initial_cash", 100000.0))
+                                print(f"Warning: Failed to get available_cash from assets_info, using cached value: {available_cash}")
+                        except Exception as e:
+                            # 如果查询失败，使用缓存的可用资金
+                            print(f"Warning: Failed to query available cash: {_format_error(e)}, using cached value")
+                            available_cash = meta.get("available_cash", meta.get("initial_cash", 100000.0))
+                        
+                        # 获取信号强度
+                        signal_strength = strategy_info.get("signal_strength", 1.0)
+                        signal_strength = max(0.0, min(1.0, signal_strength))
+                        
+                        actual_quantity = 0.0
+                        
+                        if signal.value == "buy":
+                            # 计算最大可买入数量（基于可用资金和max_pos_ratio）
+                            max_buy_value = available_cash * max_pos_ratio
+                            max_buy_quantity_raw = max_buy_value / current_price if current_price > 0 else 0
+                            
+                            # 根据信号强度计算期望买入数量
+                            desired_quantity = max_buy_quantity_raw * signal_strength
+                            
+                            # 向下取整到lot_size的倍数
+                            if lot_size > 0:
+                                desired_quantity = (desired_quantity // lot_size) * lot_size
+                            else:
+                                desired_quantity = 0
+                            
+                            # 考虑手续费后的实际可买入数量（使用固定手续费）
+                            commission_amount = meta.get("commission", 5.0)
+                            if desired_quantity >= lot_size:
+                                trade_value = desired_quantity * current_price
+                                total_cost = trade_value + commission_amount
+                                
+                                # 如果资金不足，减少买入数量
+                                if available_cash < total_cost:
+                                    available_after_commission = available_cash - commission_amount
+                                    if available_after_commission > 0 and current_price > 0:
+                                        max_affordable_quantity = available_after_commission / current_price
+                                    else:
+                                        max_affordable_quantity = 0
+                                    if lot_size > 0:
+                                        max_affordable_quantity = (max_affordable_quantity // lot_size) * lot_size
+                                    else:
+                                        max_affordable_quantity = 0
+                                    desired_quantity = min(desired_quantity, max_affordable_quantity)
+                                
+                                if desired_quantity >= lot_size:
+                                    actual_quantity = desired_quantity
+                        
+                        elif signal.value == "sell":
+                            # 获取当前持仓（从trade_records计算，或者从metrics获取）
+                            # 这里简化处理，使用metrics中的持仓
+                            current_position = 0.0
+                            try:
+                                # 读取日志文件第一行获取当前持仓
+                                config_line = None
+                                with open(meta["file_path"], "r", encoding="utf-8") as f:
+                                    config_line = f.readline()
+                                if config_line:
+                                    config = json.loads(config_line.strip())
+                                    metrics = config.get("metrics", {})
+                                    current_position = metrics.get("current_position", 0.0)
+                            except Exception:
+                                pass
+                            
+                            if current_position > 0:
+                                # 根据信号强度决定卖出比例
+                                sell_ratio = signal_strength
+                                sell_ratio = max(0.0, min(1.0, sell_ratio))
+                                
+                                desired_sell_quantity = current_position * sell_ratio
+                                
+                                # 向下取整到lot_size的倍数
+                                if lot_size > 0:
+                                    desired_sell_quantity = (desired_sell_quantity // lot_size) * lot_size
+                                else:
+                                    desired_sell_quantity = 0
+                                
+                                # 不能超过持仓
+                                desired_sell_quantity = min(desired_sell_quantity, current_position)
+                                
+                                if desired_sell_quantity >= lot_size:
+                                    actual_quantity = desired_sell_quantity
+                        
+                        # 如果计算出有效数量，记录交易
+                        if actual_quantity > 0:
+                            commission_amount = meta.get("commission", 5.0)
+                            trade_entry = {
+                                "timestamp": now_local.isoformat(),
+                                "type": "trade",
+                                "trade_type": signal.value,
+                                "price": current_price,
+                                "quantity": actual_quantity,
+                                "signal_info": strategy_info,  # 保留 signal_info 用于交易记录（向后兼容）
+                                "strategy_info": strategy_info,  # 同时添加 strategy_info
+                                "session": current_session,
+                                "signal_strength": signal_strength,
+                                "lot_size": lot_size,
+                                "max_pos_ratio": max_pos_ratio,
+                                "commission": commission_amount
+                            }
+                            trade_records.append(trade_entry)  # 添加到专门的交易记录列表
+                            _append_trade_log(task_id, trade_entry)  # 写入日志文件（用于持久化）
+                            
+                            # 更新实时指标
+                            available_cash = meta.get("available_cash", 100000.0)
+                            _update_trade_metrics(task_id, trade_records, available_cash)
+                            
+                            # 更新可用资金（简化处理，这里可以根据实际交易更新）
+                            # 在实际场景中，应该等待订单成交后更新
                     
                     last_signal_time = now
                 except Exception as e:
@@ -2389,6 +2778,45 @@ async def create_trade_task(req: TradeTaskCreateRequest):
             current_session=None,
         )
         
+        # 查询可用资金（paper和live模式都从账户查询）
+        initial_cash = 100000.0  # 默认值（如果查询失败时使用）
+        available_cash = initial_cash
+        
+        try:
+            # 查询账户的可用资金（paper和live模式都支持）
+            account_info = await longport_service.get_account_info(req.mode)
+            if account_info and "cash" in account_info:
+                available_cash = float(account_info["cash"])
+                initial_cash = available_cash
+            else:
+                print(f"Warning: Account info for {req.mode} mode does not contain cash, using default 100000.0")
+        except Exception as e:
+            # 如果查询失败，使用默认值并记录警告
+            print(f"Warning: Failed to query available cash for {req.mode} mode: {_format_error(e)}, using default 100000.0")
+        
+        # 获取当前价格（用于计算max_buy_count）
+        current_price = None
+        try:
+            quote = await longport_service.get_quote(req.symbol, req.mode)
+            if quote and "last_done" in quote:
+                current_price = float(quote["last_done"])
+        except Exception as e:
+            print(f"Warning: Failed to get current price for {req.symbol}: {_format_error(e)}")
+        
+        # 计算最大可买入数量（基于可用资金和max_pos_ratio）
+        max_buy_count = 0.0
+        if current_price and current_price > 0:
+            max_buy_value = available_cash * req.max_pos_ratio
+            max_buy_count_raw = max_buy_value / current_price
+            # 向下取整到lot_size的倍数
+            if req.lot_size > 0:
+                max_buy_count = (max_buy_count_raw // req.lot_size) * req.lot_size
+            else:
+                max_buy_count = max_buy_count_raw
+        else:
+            # 如果没有当前价格，设置一个较大的值（会在后续交易时根据实际价格计算）
+            max_buy_count = 999999.0
+        
         _trade_tasks[task_id] = {
             "symbol": req.symbol,
             "mode": req.mode,
@@ -2406,17 +2834,29 @@ async def create_trade_task(req: TradeTaskCreateRequest):
             "price_cache": [],  # 初始化价格缓存
             "price_timestamps": [],  # 初始化时间戳缓存
             "trade_records": [],  # 初始化交易记录列表（只包含买卖交易）
-            "initial_cash": 100000.0,  # 默认初始资金
+            "initial_cash": initial_cash,
+            "available_cash": available_cash,  # 当前可用资金
+            "lot_size": req.lot_size,
+            "max_pos_ratio": req.max_pos_ratio,
+            "commission": req.commission,  # 每笔交易手续费（绝对数值）
+            "max_buy_count": max_buy_count,  # 最大可买入数量（创建时的估算值）
+            "timezone": timezone,
         }
         _trade_task_paused[task_id] = False
         
-        _write_trade_header(task_id, info)
+        _write_trade_header(task_id, info, _trade_tasks[task_id])
         
         # 启动后台任务
         task = asyncio.create_task(_run_trade_task(task_id))
         _trade_task_handles[task_id] = task
         
-        return {"task_id": task_id}
+        return {
+            "task_id": task_id,
+            "initial_cash": initial_cash,
+            "available_cash": available_cash,
+            "max_buy_count": max_buy_count,
+            "current_price": current_price
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -2510,6 +2950,7 @@ async def get_trade_task(task_id: str):
                 "type": record.get("type", "trade"),
                 "trade_type": record.get("trade_type"),
                 "price": record.get("price"),
+                "quantity": record.get("quantity", 0),  # 添加实际交易数量
                 "signal_info": record.get("signal_info", {}),
                 "session": record.get("session", ""),
             })
@@ -2541,8 +2982,8 @@ async def get_trade_task(task_id: str):
         # 如果文件中的metrics不存在或过期，实时计算
         if not metrics:
             trade_records = meta.get("trade_records", [])
-            initial_cash = meta.get("initial_cash", 100000.0)
-            metrics = _calculate_trade_metrics(trade_records, initial_cash)
+            available_cash = meta.get("available_cash", 100000.0)
+            metrics = _calculate_trade_metrics(trade_records, available_cash)
         
         return {
             "config": config,

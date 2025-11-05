@@ -24,7 +24,9 @@ export default function BacktestManagement() {
     strategy_name: 'MA_Strategy',
     strategy_params: { short_window: 5, long_window: 20 },
     initial_cash: 100000.0,
-    commission_rate: 0.001,
+    commission: 5.0,
+    lot_size: 1.0,
+    max_pos_ratio: 1.0,
   });
 
   const { data: backtestList } = useQuery({
@@ -233,15 +235,47 @@ export default function BacktestManagement() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-300 mb-1">手续费率</label>
+                <label className="block text-sm font-medium text-slate-300 mb-1">手续费（绝对数值，单位：元）</label>
                 <input
                   type="number"
-                  step="0.0001"
-                  value={formData.commission_rate}
-                  onChange={(e) => setFormData({ ...formData, commission_rate: parseFloat(e.target.value) })}
+                  step="0.01"
+                  min="0"
+                  value={formData.commission ?? 5.0}
+                  onChange={(e) => setFormData({ ...formData, commission: parseFloat(e.target.value) })}
                   className="w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-400/50 transition-all duration-300 hover:bg-slate-700/60"
                   required
                 />
+                <p className="text-xs text-slate-400 mt-1">每笔交易收取的固定手续费</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1">最小交易单位 (lot_size)</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="0.01"
+                  value={formData.lot_size ?? 1.0}
+                  onChange={(e) => setFormData({ ...formData, lot_size: parseFloat(e.target.value) })}
+                  className="w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-400/50 transition-all duration-300 hover:bg-slate-700/60"
+                  required
+                />
+                <p className="text-xs text-slate-400 mt-1">每次交易数量必须是此值的倍数</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1">最大持仓比率 (max_pos_ratio)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="1.0"
+                  value={formData.max_pos_ratio ?? 1.0}
+                  onChange={(e) => setFormData({ ...formData, max_pos_ratio: parseFloat(e.target.value) })}
+                  className="w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-400/50 transition-all duration-300 hover:bg-slate-700/60"
+                  required
+                />
+                <p className="text-xs text-slate-400 mt-1">买入时最多使用可用资金的比例 (0-1)</p>
               </div>
             </div>
 

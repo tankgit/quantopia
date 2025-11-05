@@ -31,7 +31,9 @@ class Backtest:
         strategy: BaseStrategy,
         data_file_id: str,
         initial_cash: float = 100000.0,
-        commission_rate: float = 0.001
+        commission: float = 5.0,
+        lot_size: float = 1.0,
+        max_pos_ratio: float = 1.0
     ) -> dict:
         """
         运行回测
@@ -40,7 +42,9 @@ class Backtest:
             strategy: 交易策略
             data_file_id: 数据文件ID
             initial_cash: 初始资金
-            commission_rate: 手续费率
+            commission: 每笔交易手续费（绝对数值，单位：元）
+            lot_size: 最小交易单位（股数）
+            max_pos_ratio: 最大持仓比率（0-1之间）
             
         Returns:
             回测结果字典
@@ -63,7 +67,9 @@ class Backtest:
             "data_file_id": data_file_id,
             "data_metadata": metadata,
             "initial_cash": initial_cash,
-            "commission_rate": commission_rate
+            "commission": commission,
+            "lot_size": lot_size,
+            "max_pos_ratio": max_pos_ratio
         }
         self.logger.start_logging(run_id, backtest_config)
         
@@ -86,60 +92,115 @@ class Backtest:
             trade_executed = False
             trade_info = {}
             
-            # 获取仓位比例（策略可以返回0-1之间的比例，默认1.0表示全仓）
-            position_ratio = strategy_info.get("position_ratio", 1.0)
-            position_ratio = max(0.0, min(1.0, position_ratio))  # 限制在0-1之间
+            # 获取策略信号强度（用于计算交易数量）
+            signal_strength = strategy_info.get("signal_strength", 1.0)  # 默认1.0
+            signal_strength = max(0.0, min(1.0, signal_strength))  # 限制在0-1之间
             
-            if signal == Signal.BUY and cash > 0:
-                # 买入：根据仓位比例买入
-                target_cash = cash * position_ratio
-                commission = target_cash * commission_rate
-                available_cash = target_cash - commission
-                quantity = available_cash / current_price
+            # 计算最大可买入数量（基于可用资金和最大持仓比率）
+            max_buy_value = cash * max_pos_ratio
+            max_buy_quantity_raw = max_buy_value / current_price if current_price > 0 else 0
+            
+            # 根据信号强度和lot_size计算实际买入数量
+            # 信号强度越高，买入数量越多（线性关系）
+            desired_quantity = max_buy_quantity_raw * signal_strength
+            
+            # 向下取整到lot_size的倍数
+            if lot_size > 0:
+                desired_quantity = (desired_quantity // lot_size) * lot_size
+            else:
+                desired_quantity = 0
+            
+            if signal == Signal.BUY and cash > 0 and desired_quantity >= lot_size:
+                # 计算实际买入数量（考虑资金限制）
+                trade_value = desired_quantity * current_price
+                commission_cost = commission  # 固定手续费
+                total_cost = trade_value + commission_cost
                 
-                cash -= target_cash
-                position += quantity
-                trade_executed = True
-                trade_info = {
-                    "signal_reason": strategy_info.get("reason", ""),
-                    "commission": round(commission, 3),
-                    "position_ratio": round(position_ratio, 3)
-                }
+                # 如果资金不足，减少买入数量
+                if cash < total_cost:
+                    # 反向计算：可用资金能买多少（考虑手续费）
+                    available_cash = cash - commission_cost  # 扣除手续费后的可用资金
+                    if available_cash > 0 and current_price > 0:
+                        max_affordable_quantity = available_cash / current_price
+                    else:
+                        max_affordable_quantity = 0
+                    
+                    # 向下取整到lot_size的倍数
+                    if lot_size > 0:
+                        max_affordable_quantity = (max_affordable_quantity // lot_size) * lot_size
+                    else:
+                        max_affordable_quantity = 0
+                    
+                    desired_quantity = min(desired_quantity, max_affordable_quantity)
+                    trade_value = desired_quantity * current_price
+                    total_cost = trade_value + commission_cost
                 
-                self.logger.log_trade(
-                    index=i,
-                    trade_type="buy",
-                    price=current_price,
-                    quantity=round(quantity, 3),
-                    cash_after=round(cash, 3),
-                    position_after=round(position, 3),
-                    trade_info=trade_info
-                )
+                # 执行买入
+                if desired_quantity >= lot_size and cash >= total_cost:
+                    cash -= total_cost
+                    position += desired_quantity
+                    trade_executed = True
+                    trade_info = {
+                        "signal_reason": strategy_info.get("reason", ""),
+                        "quantity": round(desired_quantity, 3),
+                        "commission": round(commission_cost, 3),
+                        "signal_strength": round(signal_strength, 3),
+                        "lot_size": lot_size,
+                        "max_pos_ratio": max_pos_ratio
+                    }
+                    
+                    self.logger.log_trade(
+                        index=i,
+                        trade_type="buy",
+                        price=current_price,
+                        quantity=round(desired_quantity, 3),
+                        cash_after=round(cash, 3),
+                        position_after=round(position, 3),
+                        trade_info=trade_info
+                    )
             
             elif signal == Signal.SELL and position > 0:
-                # 卖出：根据仓位比例卖出
-                quantity = position * position_ratio
-                trade_value = quantity * current_price
-                commission = trade_value * commission_rate
-                cash += trade_value - commission
+                # 卖出逻辑：根据信号强度决定卖出比例
+                # 信号强度越高，卖出比例越大
+                sell_ratio = signal_strength
+                sell_ratio = max(0.0, min(1.0, sell_ratio))  # 限制在0-1之间
                 
-                position -= quantity
-                trade_executed = True
-                trade_info = {
-                    "signal_reason": strategy_info.get("reason", ""),
-                    "commission": round(commission, 3),
-                    "position_ratio": round(position_ratio, 3)
-                }
+                desired_sell_quantity = position * sell_ratio
                 
-                self.logger.log_trade(
-                    index=i,
-                    trade_type="sell",
-                    price=current_price,
-                    quantity=round(quantity, 3),
-                    cash_after=round(cash, 3),
-                    position_after=round(position, 3),
-                    trade_info=trade_info
-                )
+                # 向下取整到lot_size的倍数
+                if lot_size > 0:
+                    desired_sell_quantity = (desired_sell_quantity // lot_size) * lot_size
+                else:
+                    desired_sell_quantity = 0
+                
+                # 不能超过持仓
+                desired_sell_quantity = min(desired_sell_quantity, position)
+                
+                if desired_sell_quantity >= lot_size:
+                    trade_value = desired_sell_quantity * current_price
+                    commission_cost = commission  # 固定手续费
+                    cash += trade_value - commission_cost
+                    
+                    position -= desired_sell_quantity
+                    trade_executed = True
+                    trade_info = {
+                        "signal_reason": strategy_info.get("reason", ""),
+                        "quantity": round(desired_sell_quantity, 3),
+                        "commission": round(commission_cost, 3),
+                        "signal_strength": round(signal_strength, 3),
+                        "sell_ratio": round(sell_ratio, 3),
+                        "lot_size": lot_size
+                    }
+                    
+                    self.logger.log_trade(
+                        index=i,
+                        trade_type="sell",
+                        price=current_price,
+                        quantity=round(desired_sell_quantity, 3),
+                        cash_after=round(cash, 3),
+                        position_after=round(position, 3),
+                        trade_info=trade_info
+                    )
             
             # 更新历史记录
             history_entry = {

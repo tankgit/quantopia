@@ -28,6 +28,9 @@ export default function TradeManagement() {
     price_interval: { value: 5, unit: 'seconds' },
     signal_interval: { value: 30, unit: 'seconds' },
     max_cache_size: 1000,
+    lot_size: 1.0,
+    max_pos_ratio: 1.0,
+    commission: 5.0,
   });
 
   const { data: tradeList } = useQuery({
@@ -348,6 +351,46 @@ export default function TradeManagement() {
                   className={`w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 ${formData.mode === 'paper' ? 'focus:ring-purple-500/50' : 'focus:ring-orange-500/50'}`}
                   required
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">最小交易单位 (lot_size)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  value={formData.lot_size ?? 1.0}
+                  onChange={(e) => setFormData({ ...formData, lot_size: parseFloat(e.target.value) })}
+                  className={`w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 ${formData.mode === 'paper' ? 'focus:ring-purple-500/50' : 'focus:ring-orange-500/50'}`}
+                  required
+                />
+                <p className="text-xs text-slate-400 mt-1">每次交易数量必须是此值的倍数</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">最大持仓比率 (max_pos_ratio)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="1.0"
+                  value={formData.max_pos_ratio ?? 1.0}
+                  onChange={(e) => setFormData({ ...formData, max_pos_ratio: parseFloat(e.target.value) })}
+                  className={`w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 ${formData.mode === 'paper' ? 'focus:ring-purple-500/50' : 'focus:ring-orange-500/50'}`}
+                  required
+                />
+                <p className="text-xs text-slate-400 mt-1">买入时最多使用可用资金的比例 (0-1)</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">手续费（绝对数值，单位：元）</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formData.commission ?? 5.0}
+                  onChange={(e) => setFormData({ ...formData, commission: parseFloat(e.target.value) })}
+                  className={`w-full px-4 py-3 bg-slate-700/40 backdrop-blur-sm border border-slate-600/50 rounded-xl text-white focus:outline-none focus:ring-2 ${formData.mode === 'paper' ? 'focus:ring-purple-500/50' : 'focus:ring-orange-500/50'}`}
+                  required
+                />
+                <p className="text-xs text-slate-400 mt-1">每笔交易收取的固定手续费</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">价格采样间隔</label>

@@ -198,7 +198,7 @@ export default function FetchTaskDetail() {
       </div>
 
       <div className="bg-gradient-to-br from-slate-800/40 via-slate-800/30 to-slate-900/40 backdrop-blur-xl rounded-3xl p-8 border border-slate-700/30">
-        <h2 className="text-xl font-semibold text-white mb-6">最新价格（最近100条）</h2>
+        <h2 className="text-xl font-semibold text-white mb-6">最新价格（此图只显示最近100条）</h2>
         <ResponsiveContainer width="100%" height={480}>
           <LineChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
@@ -209,9 +209,9 @@ export default function FetchTaskDetail() {
               textAnchor="end"
               height={80}
             />
-            <YAxis stroke="#94a3b8" domain={yDomain as any} />
+            <YAxis stroke="#94a3b8" domain={yDomain as any} tickFormatter={(value) => Number(value).toFixed(3)} />
             <Tooltip content={<CustomTooltip />} />
-            <Line type="monotone" dataKey="price" stroke="#22c55e" dot={false} name="价格" />
+            <Line type="monotone" dataKey="price" stroke="#3b82f6" dot={false} name="价格" />
           </LineChart>
         </ResponsiveContainer>
       </div>
